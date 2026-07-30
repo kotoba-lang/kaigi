@@ -35,6 +35,16 @@
 
 (def meeting (str "media-" (js/Math.floor (* 1e9 (js/Math.random)))))
 
+(def relay-only?
+  "With `--relay`, both browsers are forced onto `iceTransportPolicy: \"relay\"`.
+
+  Without it, two browsers on one machine connect over host candidates and the
+  TURN configuration is never exercised — a completely broken relay passes every
+  other assertion in this file. `--relay` is therefore the only run that proves
+  the relay path, and it additionally asserts the selected candidate type is
+  actually `relay`."
+  (boolean (some #(= "--relay" %) (js->clj (.-argv js/process)))))
+
 (def failures (atom 0))
 (def checks (atom 0))
 
@@ -73,7 +83,8 @@
                (.on page "response"
                     (fn [r] (when (>= (.status r) 400)
                               (println "  [" who (.status r) "]" (.url r)))))
-               (-> (.goto page (str base "/?meeting=" meeting "&me=" who)
+               (-> (.goto page (str base "/?meeting=" meeting "&me=" who
+                                    (when relay-only? "&ice=relay"))
                           #js {:waitUntil "load"})
                    (.then (fn [_] page)))))))
 
@@ -152,6 +163,8 @@
                        (eval-page (:jun @st)
                                   "Array.from(document.querySelectorAll('[data-kaigi-participant] video')).filter(v => v.srcObject && v.videoWidth > 0).length")])))
         (.then (fn [ui]
+                 (when relay-only?
+                   (println "        (relay-only run: iceTransportPolicy=relay)"))
                  (check! "two participant tiles rendered" (= 2 (aget ui 0))
                          (str "tiles=" (aget ui 0)))
                  (check! "video elements are attached and have real frame dimensions"
@@ -174,6 +187,19 @@
                               10000 "jun sees rin muted")))
         (.then (fn [ok]
                  (check! "a mute in one tab is visible in the other" ok)
+                 (if relay-only?
+                   (js/Promise.all
+                    #js [(eval-page (:jun @st) "window.kaigi.selectedCandidateTypes()")
+                         (eval-page (:rin @st) "window.kaigi.selectedCandidateTypes()")])
+                   (js/Promise.resolve nil))))
+        (.then (fn [types]
+                 (when relay-only?
+                   (let [j (js->clj (aget types 0)) r (js->clj (aget types 1))]
+                     (println "        selected remote candidate types — jun:"
+                              (pr-str j) " rin:" (pr-str r))
+                     (check! "media went through the TURN relay, not around it"
+                             (and (some #{"relay"} j) (some #{"relay"} r))
+                             (str "jun=" (pr-str j) " rin=" (pr-str r)))))
                  (println)
                  (println (str @checks " checks, " @failures " failures"))
                  (js/Promise.all #js [(.close (:b1 @st)) (.close (:b2 @st))])))

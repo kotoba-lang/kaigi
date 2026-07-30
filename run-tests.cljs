@@ -12,7 +12,8 @@
 ;; tests errored.)
 ;;
 ;; Run:
-;;   nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-tests.cljs
+;;   nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src:\
+;;   ../org-ietf-turn/src:../bytes/src" run-tests.cljs
 ;;
 ;; The classpath is passed rather than baked in because nbb resolves
 ;; :local/root deps.edn entries differently from the JVM; naming the sibling
@@ -24,7 +25,8 @@
             [kaigi.model-test]
             [kaigi.plan-test]
             [kaigi.sfu-test]
-            [kaigi.signal-test]))
+            [kaigi.signal-test]
+            [kaigi.turn-test]))
 
 ;; cljs.test already prints the summary; this hook exists only so a failure
 ;; becomes a non-zero exit code, which is what a CI gate reads.
@@ -35,4 +37,5 @@
 (t/run-tests 'kaigi.model-test
              'kaigi.plan-test
              'kaigi.sfu-test
-             'kaigi.signal-test)
+             'kaigi.signal-test
+             'kaigi.turn-test)

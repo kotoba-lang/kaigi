@@ -7,7 +7,12 @@
  :deps {io.github.kotoba-lang/webrtc
         {:local/root "../webrtc"}
         io.github.kotoba-lang/org-w3-webrtc-signaling
-        {:local/root "../org-w3-webrtc-signaling"}}
+        {:local/root "../org-w3-webrtc-signaling"}
+        ;; TURN: ephemeral credential mint/verify (and, for the relay-path
+        ;; end-to-end test, a real UDP relay listener). kaigi does not
+        ;; implement the coturn credential scheme itself.
+        io.github.kotoba-lang/org-ietf-turn
+        {:local/root "../org-ietf-turn"}}
  :aliases
  {:test {:extra-paths ["test"]
          :extra-deps {io.github.cognitect-labs/test-runner

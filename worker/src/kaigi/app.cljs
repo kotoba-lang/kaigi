@@ -153,13 +153,28 @@
 ;; peer connections
 ;; ---------------------------------------------------------------------------
 
+(defn- ice-transport-policy
+  "`\"relay\"` when the URL says `?ice=relay`, otherwise `\"all\"`.
+
+  A test seam, and a deliberate one: with both browsers on the same machine a
+  call connects over host candidates and never touches the relay, so a TURN
+  deployment can be completely broken and every local test still passes.
+  Forcing relay-only is the only way to prove the relay path actually carries
+  media. It doubles as a field diagnostic — `?ice=relay` answers \"is TURN
+  working from here?\" without guessing."
+  []
+  (if (= "relay" (.get (.-searchParams (js/URL. (.. js/window -location -href))) "ice"))
+    "relay"
+    "all"))
+
 (defn- ice-config
   []
   #js {:iceServers (clj->js (mapv (fn [s]
                                     (cond-> {:urls (:urls s)}
                                       (:username s) (assoc :username (:username s))
                                       (:credential s) (assoc :credential (:credential s))))
-                                  (:ice-servers @state)))})
+                                  (:ice-servers @state)))
+       :iceTransportPolicy (ice-transport-policy)})
 
 (defn- ensure-peer!
   "The `RTCPeerConnection` for `peer-id`, created on first use with the local
@@ -168,6 +183,21 @@
   (or (get-in @state [:peers peer-id])
       (let [pc (js/RTCPeerConnection. (ice-config))
             stream (js/MediaStream.)]
+        ;; ICE gathering failures are otherwise completely silent: a TURN
+        ;; server that is unreachable, or that rejects the credential, produces
+        ;; no candidate and no exception — the call just never connects. This
+        ;; event carries the STUN/TURN error code and the URL that produced it,
+        ;; which is the difference between "TURN is broken" and "the network is
+        ;; slow".
+        (set! (.-onicecandidateerror pc)
+              (fn [ev]
+                (js/console.warn "[kaigi] ICE candidate error"
+                                 (.-errorCode ev) (.-errorText ev)
+                                 "url=" (.-url ev)
+                                 "address=" (.-address ev))))
+        (set! (.-onicegatheringstatechange pc)
+              (fn [_] (js/console.info "[kaigi] ICE gathering"
+                                       (.-iceGatheringState pc))))
         (set! (.-onicecandidate pc)
               (fn [ev]
                 (when-let [c (.-candidate ev)]
@@ -411,6 +441,37 @@
                                           :peers :remote-streams)))
            :participantCount (fn [] (count (m/admitted-ids (:meeting @state))))
            :peerIds (fn [] (clj->js (vec (keys (:peers @state)))))
+           :iceTransportPolicy (fn [] (ice-transport-policy))
+           ;; The selected candidate pair's type is the only direct evidence
+           ;; that media went through a relay rather than around it.
+           :selectedCandidateTypes
+           (fn []
+             (js/Promise.all
+              (clj->js
+               (for [[_ pc] (:peers @state)]
+                 (-> (.getStats pc)
+                     (.then (fn [report]
+                              (let [found (atom nil)]
+                                (.forEach report
+                                          (fn [s]
+                                            (when (and (= "candidate-pair" (.-type s))
+                                                       (.-selected s))
+                                              (reset! found (.-remoteCandidateId s)))))
+                                ;; fall back to any succeeded pair — Chromium
+                                ;; does not always set `selected`
+                                (when-not @found
+                                  (.forEach report
+                                            (fn [s]
+                                              (when (and (= "candidate-pair" (.-type s))
+                                                         (= "succeeded" (.-state s)))
+                                                (reset! found (.-remoteCandidateId s))))))
+                                (let [t (atom nil)]
+                                  (.forEach report
+                                            (fn [s]
+                                              (when (and (= "remote-candidate" (.-type s))
+                                                         (= (.-id s) @found))
+                                                (reset! t (.-candidateType s)))))
+                                  @t))))))))) 
            :connectionStates (fn []
                                (clj->js (into {} (map (fn [[id pc]]
                                                         [id (.-connectionState pc)]))

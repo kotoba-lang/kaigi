@@ -233,11 +233,31 @@ recorded here rather than worked around:
    ```
 
    Until then `transport` reads `:mesh` and small meetings work.
-2. **No TURN.** `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL` are unset, so
-   participants behind symmetric NAT will fail to connect over the mesh.
-   `kotoba-lang/org-ietf-turn` has a real UDP relay listener and is the
-   intended source. The console says so on screen rather than leaving a
-   participant watching a spinner.
+2. **TURN is wired but the relay path is NOT verified end to end.** What is
+   done: `kaigi.turn` mints coturn-style ephemeral credentials
+   (`username = "<expiry>:<participant-id>"`, HMAC-SHA1 under a server-only
+   secret) so no standing relay password is ever handed to a browser; the room
+   sends a fresh one per participant; `/api/kaigi/health` reports whether
+   minting actually works (`"turn":"ok"|"absent"|"error: …"`); the console warns
+   on screen when no relay is present; `?ice=relay` forces relay-only ICE and
+   `e2e-media.cljs --relay` asserts the selected candidate type is `relay`.
+
+   What is NOT done: **Chromium never contacts the relay.** Measured
+   2026-07-30 — with a valid minted credential, under both
+   `iceTransportPolicy: "relay"` and `"all"`, against both a loopback-bound and
+   a LAN-bound relay, and with both the headless shell and the full
+   Chrome-for-Testing build, Chromium gathered **zero** candidates from the
+   TURN server and emitted **zero** `icecandidateerror`, and the relay received
+   no datagrams at all.
+
+   The relay is not the problem: `org-ietf-turn`'s own `listener_demo.cljs`
+   passes 3/3 over real UDP (Allocate, ChannelBind + bidirectional ChannelData,
+   wrong-credential rejection), and `kaigi.turn`'s tests show the minted form is
+   exactly what that listener's verifier accepts. One real upstream bug was
+   found and fixed on the way (`org-ietf-turn` `ede5921`: the listener dropped
+   STUN Binding requests, which an ICE agent sends *before* it will attempt
+   Allocate) — necessary, but not sufficient. The remaining blocker is in the
+   browser's acceptance of the ICE-server configuration and is unresolved.
 3. **No recording pipeline.** The model tracks consent and an asset ref; nothing
    captures or stores media. The handoff to `gijiroku` is unbuilt.
 4. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting

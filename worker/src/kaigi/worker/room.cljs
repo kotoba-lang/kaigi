@@ -38,6 +38,7 @@
             [kaigi.model :as m]
             [kaigi.plan :as plan]
             [kaigi.signal :as sig]
+            [kaigi.turn :as turn]
             [kaigi.validate :as v]))
 
 (def ^:const max-frame-bytes
@@ -106,19 +107,17 @@
    :app-token (some-> (aget env "REALTIME_APP_TOKEN") str)})
 
 (defn- ice-servers
-  "ICE servers for the browser. STUN alone suffices for the majority of
-  networks; a symmetric-NAT or corporate-firewall pair needs TURN, and
-  without `TURN_URL` those participants will fail to connect. Reported to the
-  client as data so the UI can say so rather than showing a spinner forever."
-  [env]
-  (let [turn-url  (some-> (aget env "TURN_URL") str)
-        turn-user (some-> (aget env "TURN_USERNAME") str)
-        turn-cred (some-> (aget env "TURN_CREDENTIAL") str)]
-    (cond-> [{:urls ["stun:stun.cloudflare.com:3478"]}]
-      (and turn-url (seq turn-url))
-      (conj (cond-> {:urls [turn-url]}
-              (seq (str turn-user)) (assoc :username turn-user)
-              (seq (str turn-cred)) (assoc :credential turn-cred))))))
+  "ICE servers for one participant, with a freshly minted TURN credential when
+  a relay is configured.
+
+  Per-participant and per-call rather than computed once: the credential
+  expires and is bound to the participant id (`kaigi.turn`), so it cannot be
+  shared between the roster and cannot outlive the meeting. The clock is read
+  here — this is the host layer — and handed to the pure minting function."
+  [env participant-id]
+  (turn/ice-servers (turn/config-from-env (fn [k] (aget env k)))
+                    participant-id
+                    (js/Math.floor (/ (js/Date.now) 1000))))
 
 (defn- persist!
   "Write the live meeting value to DO storage so a woken room resumes instead
@@ -146,7 +145,7 @@
                    :kaigi/meeting mtg
                    :kaigi/you id
                    :kaigi/transport (plan/transport cfg)
-                   :kaigi/ice-servers (ice-servers env)})
+                   :kaigi/ice-servers (ice-servers env (or id ""))})
         (when (and id (m/admitted? mtg id) (m/in-room? mtg id))
           (send! ws {:t :plan
                      :kaigi/plan (plan/plan-for mtg sessions id {} cfg)}))))))

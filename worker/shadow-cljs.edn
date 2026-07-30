@@ -17,6 +17,9 @@
                 "../src"
                 "../../webrtc/src"
                 "../../org-w3-webrtc-signaling/src"
+                ;; TURN ephemeral credentials (kaigi.turn) + its byte helpers
+                "../../org-ietf-turn/src"
+                "../../bytes/src"
                 ;; design system, for the browser console's views
                 "../../kotoba-ui/src"
                 "../../liquid-glass-ui/src"

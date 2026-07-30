@@ -27,6 +27,7 @@
   comment records that this passed review more than once. Verify with
   `nbb verify-bundle.cljs`, which actually `import()`s the artifact."
   (:require [clojure.string :as str]
+            [kaigi.turn :as turn]
             [kaigi.worker.room :as room]))
 
 (deftype KaigiRoom [ctx env]
@@ -47,6 +48,17 @@
   (js/Response. (js/JSON.stringify (clj->js body))
                 #js {:status status
                      :headers #js {"content-type" "application/json; charset=utf-8"}}))
+
+(defn- turn-status
+  "`\"absent\"`, `\"ok\"`, or `\"error: …\"`."
+  [env]
+  (let [cfg (turn/config-from-env (fn [k] (aget env k)))]
+    (if-not (turn/turn-configured? cfg)
+      "absent"
+      (try
+        (let [servers (turn/ice-servers cfg "healthcheck" 0)]
+          (if (turn/relay-available? servers) "ok" "error: no relay in result"))
+        (catch :default e (str "error: " (.-message e)))))))
 
 (defn- navigation?
   "Whether `request` is a browser navigating to a page, as opposed to fetching
@@ -102,7 +114,14 @@
        (json 200 {:ok true
                   :transport (if (and (aget env "REALTIME_APP_ID")
                                       (aget env "REALTIME_APP_TOKEN"))
-                               "sfu" "mesh")})
+                               "sfu" "mesh")
+                  ;; Not just "is TURN configured" but "does minting a
+                  ;; credential actually work here". Those differ, and the
+                  ;; difference is invisible from outside: a mint that throws
+                  ;; inside the room takes the WebSocket down with a bare 1006
+                  ;; and nothing in the logs. Reporting it here is what turns
+                  ;; that into one curl.
+                  :turn (turn-status env)})
 
        (= path "/api/kaigi/ws")
        (let [meeting (or (.get (.-searchParams url) "meeting") "")]
