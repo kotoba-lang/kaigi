@@ -21,10 +21,11 @@ persists it, and moves the bytes.
 | `kaigi.model` / `validate` / `plan` / `sfu` / `signal` | **implemented** | 52 tests / 184 assertions green on **both** JVM and nbb |
 | DO signaling room (`kaigi.worker.*`) | **implemented, deployed** | 22/22 end-to-end checks against the live Worker, 4 consecutive clean runs |
 | Cloudflare Realtime SFU path | **implemented, not exercised** | no Realtime app is provisioned for this account — see below |
-| Browser UI + real media (`getUserMedia`, `RTCPeerConnection`) | **not built** | — |
+| Browser console (`kaigi.ui` + `kaigi.app`) | **implemented, deployed** | rendered page scores **100.00 / 0 findings** on the deterministic HIG/WCAG audit |
+| Real call (mesh) | **works** | two headless Chromium instances, ICE connected, **~190 KB of inbound RTP measured on each side**, 3 consecutive clean production runs |
 
-So: **signaling works end to end against a real Durable Object; no media has
-flowed yet.** A call needs the browser half, which does not exist in this repo.
+So: **a real two-party call works in production over mesh.** The SFU path is
+written and untested against the live service; see "What is missing" below.
 
 ## What it composes rather than reimplements
 
@@ -160,6 +161,18 @@ node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release
 nbb verify-bundle.cljs                      # actually import()s the artifact
 npx wrangler dev --port 8799 --local &
 nbb e2e.cljs ws://127.0.0.1:8799            # two real sockets against a real DO
+
+# console: SSR the shell, score it, build the browser bundle
+nbb --classpath "../src:../../webrtc/src:../../org-w3-webrtc-signaling/src:\
+../../kotoba-ui/src:../../liquid-glass-ui/src:../../shitsuke/src:\
+../../css/src:../../html/src:../../appkit/src" generate-page.cljs
+(cd ../../design-quality && nbb -m design-quality.cli score ../kaigi/worker/public/index.html --min 100)
+node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release app
+
+# a real call: two headless Chromium instances with fake devices, asserting
+# inbound RTP bytes > 0 on both sides
+nbb e2e-media.cljs http://127.0.0.1:8799
+
 npx wrangler deploy
 ```
 
@@ -170,12 +183,46 @@ refuses to run against an artifact older than the newest source — added after 
 failed build left the previous bundle in place and the verifier reported six
 green checks against code that did not compile.
 
+## The console
+
+`kaigi.ui` is pure `.cljc` hiccup on `kotoba-ui.core`; `generate-page.cljs` SSRs
+it to `public/index.html` and `kaigi.app` re-invokes the same fn on every roster
+change and swaps it in. One markup source for both hosts.
+
+Two structural details that are load-bearing:
+
+**Video elements are not part of the re-rendered tree.** Tiles emit an empty
+`data-kaigi-participant` container; `kaigi.app` creates one `<video>` per
+participant and re-parents it after each render. A `<video>` that gets replaced
+loses `srcObject` and restarts playback, so a mute toggle would flicker
+everyone's video.
+
+**Offer direction comes from the plan, not from negotiation.** The room tells
+each side whether it is `:offerer` or `:answerer`, so there is no
+perfect-negotiation rollback logic and no state where both peers hold a local
+offer.
+
+### Design-system findings worth knowing before extending this
+
+The console is built on `kotoba-ui.core` + shell only, and the rendered page
+scores **100.00** with zero findings. Two upstream gaps were hit and are
+recorded here rather than worked around:
+
+- **`panel` / `button` silently drop unknown opts.** They resolve to
+  `shitsuke.components/card` / `button`, which read only `:class` (a **string**)
+  and `:id` / `:act`. Passing `:attrs {:data-kaigi-tile id}` rendered markup
+  that looked correct and carried no data attributes at all, so the browser
+  found zero tiles to attach video to — with no error anywhere. Data hooks
+  therefore live on plain wrapper elements, and targeted actions encode their
+  target in the `:act` string (`"admit:rin"`).
+- **A toggle cannot expose `aria-pressed`** for the same reason, and
+  hand-rolling a `<button>` is the failure the agent-guide names explicitly. The
+  labels state the current state instead. Adding `:attrs` support to the
+  liquid-glass components would close both.
+
 ## What is missing, precisely
 
-1. **The browser half.** No UI, no `getUserMedia`, no `RTCPeerConnection`. The
-   signaling plane is proven; no audio or video has crossed it. This is the gap
-   between "signaling works" and "you can have a meeting".
-2. **The SFU path is untested against the real service.** No Cloudflare
+1. **The SFU path is untested against the real service.** No Cloudflare
    Realtime app exists for this account — the wrangler OAuth session carries no
    `calls`/`realtime` scope, and minting an app token needs the dashboard.
    Provisioning is one owner action and no code change:
@@ -186,11 +233,12 @@ green checks against code that did not compile.
    ```
 
    Until then `transport` reads `:mesh` and small meetings work.
-3. **No TURN.** `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL` are unset, so
+2. **No TURN.** `TURN_URL` / `TURN_USERNAME` / `TURN_CREDENTIAL` are unset, so
    participants behind symmetric NAT will fail to connect over the mesh.
    `kotoba-lang/org-ietf-turn` has a real UDP relay listener and is the
-   intended source.
-4. **No recording pipeline.** The model tracks consent and an asset ref; nothing
+   intended source. The console says so on screen rather than leaving a
+   participant watching a spinner.
+3. **No recording pipeline.** The model tracks consent and an asset ref; nothing
    captures or stores media. The handoff to `gijiroku` is unbuilt.
-5. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting
+4. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting
    can name the chat channel it was called from; nothing reads it yet.

@@ -100,6 +100,21 @@
                  (fail! (str "malformed meeting id returned " (.-status res)
                              ", expected 400")))))))
 
+(defn- check-navigation-without-assets
+  "A navigation request on a deployment with no ASSETS binding must answer,
+  not throw. Exercised here because the misconfiguration is silent until a
+  browser hits it."
+  [handler]
+  (-> ((.-fetch handler)
+       (js/Request. "https://kaigi.example/deep/link"
+                    #js {:headers #js {"Accept" "text/html"}})
+       #js {} #js {})
+      (.then (fn [res]
+               (if (= 404 (.-status res))
+                 (ok! "a navigation with no ASSETS binding answers 404 instead of throwing")
+                 (fail! (str "navigation without ASSETS returned " (.-status res))))))
+      (.catch (fn [e] (fail! (str "navigation without ASSETS threw: " (.-message e)))))))
+
 (defn- check-404
   [handler]
   (-> ((.-fetch handler)
@@ -134,7 +149,8 @@
                          (check-methods ctor)
                          (-> (check-health handler)
                              (.then #(check-bad-meeting-id handler))
-                             (.then #(check-404 handler))))))))
+                             (.then #(check-404 handler))
+                             (.then #(check-navigation-without-assets handler))))))))
         (.then (fn [_]
                  (println)
                  (println (if (= 1 (.-exitCode js/process))

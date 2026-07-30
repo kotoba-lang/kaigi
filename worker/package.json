@@ -9,6 +9,7 @@
     "deploy": "wrangler deploy"
   },
   "devDependencies": {
+    "playwright": "^1.62.0",
     "shadow-cljs": "^2.28.20",
     "wrangler": "^4.69.0"
   },

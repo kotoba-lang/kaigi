@@ -48,6 +48,24 @@
                 #js {:status status
                      :headers #js {"content-type" "application/json; charset=utf-8"}}))
 
+(defn- navigation?
+  "Whether `request` is a browser navigating to a page, as opposed to fetching
+  a subresource or calling an API.
+
+  Keyed on the `Accept` header rather than on the path shape: a path-based rule
+  has to guess which extensions are assets, and guesses wrong for exactly the
+  deep links a meeting URL produces."
+  [request]
+  (and (= "GET" (.-method request))
+       (let [accept (or (.get (.-headers request) "Accept") "")]
+         (.includes accept "text/html"))))
+
+;; The `(aget env "ASSETS")` guard on the branch below is not defensive
+;; boilerplate: without it a deployment whose assets binding is missing would
+;; throw on every navigation instead of answering the JSON 404, turning a
+;; configuration mistake into a crash with a stack trace where a diagnosable
+;; response belongs.
+
 (defn- route-to-room
   "Forward a request to the DO instance for `meeting-id`.
 
@@ -91,6 +109,19 @@
          (if (and (seq meeting) (re-matches meeting-id-pattern meeting))
            (route-to-room env meeting request)
            (json 400 {:error "meeting id must match [A-Za-z0-9_.:-]{1,128}"})))
+
+       ;; Anything else is either a real asset miss or a deep link into the
+       ;; console. Serve the shell for navigations.
+       ;;
+       ;; This branch exists because of a production failure that `curl` could
+       ;; not reproduce: with both `main` and `assets` configured, an asset
+       ;; lookup that misses falls through to HERE rather than to the asset
+       ;; layer's `not_found_handling`. One of two browsers in the same meeting
+       ;; got a 404 for the console page while the other loaded normally, so the
+       ;; meeting silently had one participant and no error named the cause.
+       (and (navigation? request) (aget env "ASSETS"))
+       (.fetch (aget env "ASSETS")
+               (js/Request. (str (.-origin url) "/") request))
 
        :else
        (json 404 {:error (str "no route for " path)})))))
