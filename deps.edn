@@ -1,0 +1,19 @@
+{:paths ["src"]
+ ;; kaigi is the meeting layer, not a second WebRTC implementation: track and
+ ;; subscription state comes from `webrtc` (kotoba.webrtc.room/session) and
+ ;; relay routing from `org-w3-webrtc-signaling` (kotoba.rt.core). Both are
+ ;; pure .cljc with no transport, which is why they compose here without
+ ;; dragging a runtime in.
+ :deps {io.github.kotoba-lang/webrtc
+        {:local/root "../webrtc"}
+        io.github.kotoba-lang/org-w3-webrtc-signaling
+        {:local/root "../org-w3-webrtc-signaling"}}
+ :aliases
+ {:test {:extra-paths ["test"]
+         :extra-deps {io.github.cognitect-labs/test-runner
+                      {:git/tag "v0.5.1" :git/sha "dfb30dd"}}
+         :main-opts ["-m" "cognitect.test-runner"]
+         :exec-fn cognitect.test-runner.api/test}
+  :lint {:replace-deps {clj-kondo/clj-kondo {:mvn/version "2024.11.14"}}
+         :main-opts ["-m" "clj-kondo.main" "--lint" "src" "test"
+                     "--fail-level" "error"]}}}

@@ -1,0 +1,30 @@
+;; kaigi Worker build.
+;;
+;; :target :esm because a Cloudflare Worker module needs `export default` and
+;; a named class export for the Durable Object binding. `:exports` maps both:
+;; `default` to the fetch handler object and `KaigiRoom` to the deftype, which
+;; compiles to a real class with an un-munged prototype.
+;;
+;; :simple, not :advanced. The code reads untyped fields off runtime objects
+;; the compiler has never seen — `ctx.storage`, `ws.serializeAttachment`,
+;; `env.KAIGI_ROOMS` — and :advanced's property renaming would rewrite those
+;; property names into gibberish the runtime does not answer to. The same
+;; hazard cloud-itonami's :edge-api comment documents.
+{:source-paths ["src"
+                ;; the portable core, consumed in place: kaigi's own .cljc plus
+                ;; the two libraries it composes. No jar, no publish step —
+                ;; these are west checkouts sitting next to each other.
+                "../src"
+                "../../webrtc/src"
+                "../../org-w3-webrtc-signaling/src"]
+ :dependencies []
+ :builds
+ {:worker
+  {:target :esm
+   :output-dir "dist"
+   :modules {:kaigi-worker
+             {:exports {default   kaigi.worker.entry/handler
+                        KaigiRoom kaigi.worker.entry/KaigiRoom}}}
+   :compiler-options {:optimizations :simple
+                      :output-feature-set :es2020
+                      :infer-externs :auto}}}}

@@ -1,0 +1,19 @@
+{
+  "name": "kaigi-worker",
+  "private": true,
+  "type": "module",
+  "description": "kaigi signaling room — Cloudflare Worker + Durable Object, compiled from ClojureScript",
+  "scripts": {
+    "build": "shadow-cljs release worker",
+    "verify": "nbb verify-bundle.cljs",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "shadow-cljs": "^2.28.20",
+    "wrangler": "^4.69.0"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260722.1": true
+  }
+}
