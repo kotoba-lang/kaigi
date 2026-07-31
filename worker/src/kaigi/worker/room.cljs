@@ -37,6 +37,7 @@
             [clojure.string :as str]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
+            [kaigi.recording :as recording]
             [kaigi.signal :as sig]
             [kaigi.turn :as turn]
             [kaigi.validate :as v]))
@@ -287,14 +288,70 @@
                  (update :kaigi/participants dissoc "")
                  (assoc-in [:kaigi/participants id]
                            (assoc (m/participant id {:role :host})
-                                  :kaigi.participant/admission :admitted))))
+                                  :kaigi.participant/admission :admitted))
+                 ;; A room someone has walked into IS live. Without this the
+                 ;; meeting sits at `:scheduled` forever, because nothing sends
+                 ;; the `:start` control — and `:scheduled` silently disables
+                 ;; everything gated on `live?`: recording cannot be armed and
+                 ;; `kaigi.recording/capturing?` is false for everyone. The
+                 ;; symptom is a start-recording button that does nothing, with
+                 ;; no error anywhere. Found by the recording end-to-end run.
+                 (m/start)))
       state)))
 
+(defn- upload-part!
+  "Store one recorded part in R2, authorized against the LIVE meeting.
+
+  Authorization is the reason this goes through the Durable Object at all
+  rather than straight to a bucket: the DO holds the only authoritative answer
+  to \"is recording on, and is this participant admitted and in the room\".
+  `kaigi.recording/capturing?` is the same predicate the browser uses to decide
+  whether to record, so a client that keeps recording after consent is
+  withdrawn finds its uploads refused rather than quietly accepted.
+
+  A bucket-scoped presigned URL would be faster and would move that decision
+  to whoever holds the URL — which is exactly the decision that must not
+  move."
+  [ctx env request]
+  (let [url (js/URL. (.-url request))
+        participant (or (.get (.-searchParams url) "participant") "")
+        seq-n (or (.get (.-searchParams url) "seq") "")
+        bucket (aget env "KAIGI_RECORDINGS")]
+    (-> (ensure-state! ctx (or (.get (.-searchParams url) "meeting") "kaigi"))
+        (.then (fn [state]
+                 (let [mtg (:meeting state)]
+                   (cond
+                     (not bucket)
+                     (js/Response. "recording storage is not configured" #js {:status 501})
+
+                     (not (and (valid-id? participant) (re-matches #"^\d{1,6}$" (str seq-n))))
+                     (js/Response. "bad participant or seq" #js {:status 400})
+
+                     (not (recording/capturing? mtg participant))
+                     ;; 409, not 403: the participant may be perfectly
+                     ;; legitimate and simply recording after consent was
+                     ;; withdrawn. The distinction is what tells a client to
+                     ;; stop rather than to re-authenticate.
+                     (js/Response. "recording is not active for this participant"
+                                   #js {:status 409})
+
+                     :else
+                     (let [k (recording/object-key (:kaigi/id mtg) participant
+                                                   (js/parseInt seq-n 10))]
+                       (-> (.put bucket k (.-body request))
+                           (.then (fn [_]
+                                    (js/Response. (encode {:t :stored :kaigi/key k})
+                                                  #js {:status 201})))))))))
+        (.catch (fn [e]
+                  (js/Response. (str "upload failed: " (.-message e)) #js {:status 500}))))))
+
 (defn on-fetch
-  "WebSocket upgrade for one room."
+  "WebSocket upgrade for one room, or a recording upload."
   [ctx env request]
   (if (not= "websocket" (some-> (.get (.-headers request) "Upgrade") str/lower-case))
-    (js/Promise.resolve (js/Response. "expected websocket" #js {:status 426}))
+    (if (= "PUT" (.-method request))
+      (upload-part! ctx env request)
+      (js/Promise.resolve (js/Response. "expected websocket" #js {:status 426})))
     (let [url (js/URL. (.-url request))
           meeting-id (or (.get (.-searchParams url) "meeting") "kaigi")]
       (-> (ensure-state! ctx meeting-id)

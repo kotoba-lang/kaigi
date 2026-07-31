@@ -34,6 +34,7 @@
             [clojure.string :as str]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
+            [kaigi.recording :as recording]
             [kaigi.ui :as kui]
             [kotoba-ui.core :as ui]))
 
@@ -283,6 +284,75 @@
 
       (js/console.warn "[kaigi] unknown signal kind" (pr-str kind)))))
 
+
+;; ---------------------------------------------------------------------------
+;; recording
+;; ---------------------------------------------------------------------------
+
+(defonce ^:private recorder (atom {:mr nil :seq 0}))
+
+(defn- upload-part!
+  "PUT one recorded blob to the room, which authorizes it against the live
+  meeting before it reaches storage."
+  [blob n]
+  (let [proto (if (= "https:" (.. js/window -location -protocol)) "https:" "http:")
+        url (str proto "//" (.. js/window -location -host)
+                 "/api/kaigi/recording?meeting=" (js/encodeURIComponent (meeting-id))
+                 "&participant=" (js/encodeURIComponent (:me @state))
+                 "&seq=" n)]
+    (-> (js/fetch url #js {:method "PUT" :body blob})
+        (.then (fn [res]
+                 (when-not (.-ok res)
+                   ;; 409 means the room says this participant should not be
+                   ;; recording — consent was withdrawn, or the meeting ended.
+                   ;; Stopping here is the belt to `sync-recording!`'s braces:
+                   ;; the client stops when the state says so, AND stops if it
+                   ;; somehow did not.
+                   (js/console.warn "[kaigi] recording part refused" (.-status res))
+                   (when (= 409 (.-status res))
+                     (some-> (:mr @recorder) (.stop))))))
+        (.catch (fn [e] (js/console.warn "[kaigi] recording upload failed" (.-message e)))))))
+
+(defn- start-recorder! []
+  (when-let [stream (:local-stream @state)]
+    (when-not (:mr @recorder)
+      (try
+        (let [mr (js/MediaRecorder. stream #js {:mimeType (:mime recording/container)})]
+          (set! (.-ondataavailable mr)
+                (fn [ev]
+                  (let [b (.-data ev)]
+                    (when (pos? (.-size b))
+                      (let [n (:seq (swap! recorder update :seq inc))]
+                        (upload-part! b n))))))
+          (set! (.-onstop mr) (fn [_] (swap! recorder assoc :mr nil)))
+          (swap! recorder assoc :mr mr)
+          ;; One part per 5s: small enough that a crashed tab loses seconds
+          ;; rather than the whole meeting, large enough not to make a request
+          ;; per frame.
+          (.start mr 5000)
+          (js/console.info "[kaigi] recording started"))
+        (catch :default e
+          (js/console.warn "[kaigi] MediaRecorder unavailable:" (.-message e)))))))
+
+(defn- stop-recorder! []
+  (when-let [mr (:mr @recorder)]
+    (try (.stop mr) (catch :default _ nil))
+    (js/console.info "[kaigi] recording stopped")))
+
+(defn- sync-recording!
+  "Make the local recorder match what the meeting says.
+
+  Called on every roster update. This is the whole mechanism: the client holds
+  no independent \"am I recording\" decision, so a consent withdrawal — which
+  turns `recording-on?` off in the shared value — stops every recorder on the
+  next frame without anyone sending a stop."
+  []
+  (let [{:keys [meeting me]} @state]
+    (when meeting
+      (if (recording/capturing? meeting me)
+        (start-recorder!)
+        (stop-recorder!)))))
+
 (defn- handle-frame!
   [frame]
   (case (:t frame)
@@ -291,7 +361,8 @@
                       :me (or (:kaigi/you frame) (:me @state))
                       :transport (:kaigi/transport frame)
                       :ice-servers (:kaigi/ice-servers frame))
-               (render!))
+               (render!)
+               (sync-recording!))
     :plan  (let [p (:kaigi/plan frame)]
              (swap! state assoc :warning (:kaigi.plan/warning p))
              (render!)
@@ -472,6 +543,8 @@
                                                          (= (.-id s) @found))
                                                 (reset! t (.-candidateType s)))))
                                   @t))))))))) 
+           :recording (fn [] (clj->js {:running (boolean (:mr @recorder))
+                                       :parts (:seq @recorder)}))
            :connectionStates (fn []
                                (clj->js (into {} (map (fn [[id pc]]
                                                         [id (.-connectionState pc)]))

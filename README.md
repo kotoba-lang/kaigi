@@ -147,6 +147,39 @@ GET /api/kaigi/health            liveness + which transport is active
 operational question whose wrong answer is invisible: a deployment missing
 `REALTIME_APP_ID` works fine, in mesh, until the fifth participant joins.
 
+## Recording
+
+Every participant records their own stream while recording is armed; parts land
+in R2 under `kaigi/<meeting>/<participant>/<zero-padded-seq>.webm`, and the
+meeting carries only a prefix.
+
+**The client holds no "am I recording" flag.** `kaigi.recording/capturing?` is a
+function of the meeting value — armed, live, admitted, in the room — and the
+browser re-evaluates it on every roster update. That is the entire mechanism by
+which a consent withdrawal stops capture: `kaigi.model/revoke-recording-consent`
+turns recording off in the shared value, and every recorder stops on the next
+frame without anyone sending a stop. A client with its own boolean would leave
+microphones running while the model said off.
+
+The upload goes **through the Durable Object**, not to a presigned bucket URL.
+The DO is the only holder of the authoritative meeting, so it is the only thing
+that can answer "is this participant still allowed to be recording"; a presigned
+URL moves that decision to whoever holds the URL, which is precisely the decision
+that must not move. A part uploaded after a withdrawal gets 409 and the client
+stops.
+
+The handoff record for `kotoba-lang/gijiroku` carries the asset reference, the
+participants and the consent set — never media, never a transcript (its charter
+G4). `handoff-problems` re-checks consent rather than inferring it from the
+existence of a file, which is G3: *"there is a recording, so they must have
+agreed"* is the inference the charter forbids.
+
+Measured end to end (two headless Chromium instances, fake devices, local R2):
+both participants recorded, **4 objects of ~300 KB of real WebM** landed under
+exactly the keys `object-key` specifies, a withdrawal turned recording off in
+the shared value and stopped both recorders, in-flight parts were refused 409 by
+the room, and nothing further was captured.
+
 ## Build and test
 
 ```bash
@@ -258,7 +291,7 @@ recorded here rather than worked around:
    STUN Binding requests, which an ICE agent sends *before* it will attempt
    Allocate) — necessary, but not sufficient. The remaining blocker is in the
    browser's acceptance of the ICE-server configuration and is unresolved.
-3. **No recording pipeline.** The model tracks consent and an asset ref; nothing
-   captures or stores media. The handoff to `gijiroku` is unbuilt.
+3. **~~No recording pipeline.~~ Built.** See "Recording" below. What remains is
+   the consuming side: `gijiroku` does not yet read the handoff record.
 4. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting
    can name the chat channel it was called from; nothing reads it yet.

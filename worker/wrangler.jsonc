@@ -52,5 +52,13 @@
   // participants behind symmetric NAT will fail to connect over the mesh.
   // `kaigi.worker.room/ice-servers` reports the server list to the client as
   // data so the UI can say that, rather than spinning forever.
+  // Recordings. Media lives HERE and never in the Durable Object or the
+  // meeting value — `kaigi.recording` stores only an object-key prefix, which
+  // is what keeps `gijiroku`'s G4 (raw audio/video never enters the store)
+  // true at the producing end.
+  "r2_buckets": [
+    { "binding": "KAIGI_RECORDINGS", "bucket_name": "kaigi-recordings" }
+  ],
+
   "observability": { "enabled": true }
 }
