@@ -20,7 +20,8 @@ persists it, and moves the bytes.
 |---|---|---|
 | `kaigi.model` / `validate` / `plan` / `sfu` / `signal` | **implemented** | 52 tests / 184 assertions green on **both** JVM and nbb |
 | DO signaling room (`kaigi.worker.*`) | **implemented, deployed** | 22/22 end-to-end checks against the live Worker, 4 consecutive clean runs |
-| Cloudflare Realtime SFU path | **implemented, not exercised** | no Realtime app is provisioned for this account — see below |
+| Cloudflare **RealtimeKit** path | **binding + gate implemented, not exercised** | needs a Cloudflare API token and a preset — see below |
+| Cloudflare Realtime **SFU** path | **implemented, retained, not the chosen path** | kept deliberately; see "Two media planes" |
 | Browser console (`kaigi.ui` + `kaigi.app`) | **implemented, deployed** | rendered page scores **100.00 / 0 findings** on the deterministic HIG/WCAG audit |
 | Real call (mesh) | **works** | two headless Chromium instances, ICE connected, **~190 KB of inbound RTP measured on each side**, 3 consecutive clean production runs |
 
@@ -102,6 +103,43 @@ Above `mesh-participant-ceiling` (4) the plan carries a `:kaigi.plan/warning`
 **as data**, so the UI can say the meeting outgrew the transport. A limit the
 operator only learns from server logs is a limit participants experience as
 "the app is broken".
+
+## Two media planes, and why both are here
+
+`kaigi.plan/transport` returns `:realtimekit`, `:sfu` or `:mesh` — decided by
+configuration, never by headcount, so a deployment behaves the same on every
+join instead of switching topology mid-meeting.
+
+**RealtimeKit is the chosen path** (owner decision, 2026-07-31). It is a
+different product from the SFU with a different API and different credentials,
+and the two are not interchangeable: measured that day, the RealtimeKit app id
+returns exactly the same `not_found` from `rtc.live.cloudflare.com` as an
+all-zeros UUID does.
+
+|  | SFU | RealtimeKit |
+|---|---|---|
+| host | `rtc.live.cloudflare.com/v1/apps/{app}` | `api.cloudflare.com/client/v4/accounts/{acct}/realtime/kit/{app}` |
+| credential | app secret | Cloudflare API token |
+| abstraction | sessions and tracks, no rooms | meetings and participants |
+
+**`kaigi.sfu` is retained rather than deleted.** The binding is written and
+tested against the published OpenAPI, the SFU stays the lower-level option for
+raw track control, and removing it would mean rediscovering the wire format the
+next time anyone wants it.
+
+### RealtimeKit does not replace `kaigi.model`
+
+RealtimeKit has its own meetings and participants, and adopting them wholesale
+would put two authorities in one system — its presets deciding who may speak
+while `kaigi.model` decides who is admitted, disagreeing the first time a host
+denies someone.
+
+So `kaigi.model` stays the authority for admission, roles and consent, and
+RealtimeKit carries media. The seam is `kaigi.realtimekit/token-refusal`: the
+room mints a participant token only for someone the model says is `:admitted`.
+RealtimeKit never learns about the lobby and does not need to — a meeting you
+cannot get a token for is one you cannot join. That check is the *only* place
+the gate exists, because a token already issued is a join already possible.
 
 ## SFU binding
 
@@ -255,7 +293,15 @@ recorded here rather than worked around:
 
 ## What is missing, precisely
 
-1. **The SFU path is untested against the real service.** No Cloudflare
+1. **The RealtimeKit path is not wired past the binding.** `kaigi.realtimekit`
+   shapes the calls and `token-refusal` gates them, both tested — but the room
+   does not yet create a RealtimeKit meeting or mint tokens, and the browser
+   does not yet load the RealtimeKit SDK. Two owner actions unblock it:
+   a Cloudflare **API token** with RealtimeKit permissions
+   (`REALTIMEKIT_API_TOKEN`) and a **preset name** configured in the dashboard
+   (`REALTIMEKIT_PRESET`); the app id (`REALTIMEKIT_APP_ID`) and account id
+   already exist.
+2. **The SFU path is untested against the real service.** No Cloudflare
    Realtime app exists for this account — the wrangler OAuth session carries no
    `calls`/`realtime` scope, and minting an app token needs the dashboard.
    Provisioning is one owner action and no code change:
@@ -266,7 +312,7 @@ recorded here rather than worked around:
    ```
 
    Until then `transport` reads `:mesh` and small meetings work.
-2. **TURN is wired but the relay path is NOT verified end to end.** What is
+3. **TURN is wired but the relay path is NOT verified end to end.** What is
    done: `kaigi.turn` mints coturn-style ephemeral credentials
    (`username = "<expiry>:<participant-id>"`, HMAC-SHA1 under a server-only
    secret) so no standing relay password is ever handed to a browser; the room
@@ -291,7 +337,7 @@ recorded here rather than worked around:
    STUN Binding requests, which an ICE agent sends *before* it will attempt
    Allocate) — necessary, but not sufficient. The remaining blocker is in the
    browser's acceptance of the ICE-server configuration and is unresolved.
-3. **~~No recording pipeline.~~ Built.** See "Recording" below. What remains is
+4. **~~No recording pipeline.~~ Built.** See "Recording" below. What remains is
    the consuming side: `gijiroku` does not yet read the handoff record.
-4. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting
+5. **Not wired to `kaisha` or `calendar`.** `:kaigi/channel` exists so a meeting
    can name the chat channel it was called from; nothing reads it yet.

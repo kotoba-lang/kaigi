@@ -25,6 +25,7 @@
   roster change, which is visible as a video freeze for everyone — so the
   plan is always expressed as `pull these, close those`."
   (:require [kaigi.model :as m]
+            [kaigi.realtimekit :as rk]
             [kaigi.sfu :as sfu]
             [kotoba.webrtc.room :as room]))
 
@@ -40,9 +41,26 @@
   4)
 
 (defn transport
-  "`:sfu` when `config` has an app id and token, `:mesh` otherwise."
+  "Which media plane carries this meeting: `:realtimekit`, `:sfu` or `:mesh`.
+
+  Configuration decides, not headcount, so a deployment behaves the same on
+  every join instead of switching topology mid-meeting.
+
+  RealtimeKit wins when both are configured. They are alternatives rather than
+  layers — RealtimeKit is built on the SFU, so running kaigi against both at
+  once would mean two systems allocating tracks for the same participants — and
+  a deployment that somehow carried both should behave predictably rather than
+  by accident of check order.
+
+  `kaigi.sfu` is retained even though RealtimeKit is the chosen path: the
+  binding is written and tested, the SFU remains the lower-level option, and
+  deleting it would mean rediscovering the wire format the next time someone
+  wants raw track control."
   [config]
-  (if (sfu/configured? config) :sfu :mesh))
+  (cond
+    (rk/configured? config) :realtimekit
+    (sfu/configured? config) :sfu
+    :else :mesh))
 
 (defn mesh-viable?
   "True when the meeting is small enough for a full mesh."
@@ -180,6 +198,12 @@
   experience as 'the app is broken'."
   [mtg sessions viewer-id subscribed config]
   (case (transport config)
+    ;; RealtimeKit's SDK owns track subscription entirely: the client joins
+    ;; with a token and the service decides what it receives. There is no plan
+    ;; to compute — emitting an empty one would suggest kaigi had an opinion it
+    ;; does not have.
+    :realtimekit {:kaigi.plan/transport :realtimekit}
+
     :sfu (assoc (sfu-plan mtg sessions viewer-id subscribed)
                 :kaigi.plan/transport :sfu)
     :mesh (cond-> {:kaigi.plan/transport :mesh
