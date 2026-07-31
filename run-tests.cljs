@@ -26,6 +26,7 @@
             [kaigi.plan-test]
             [kaigi.sfu-test]
             [kaigi.signal-test]
+            [kaigi.realtimekit-test]
             [kaigi.recording-test]
             [kaigi.turn-test]))
 
@@ -39,5 +40,6 @@
              'kaigi.plan-test
              'kaigi.sfu-test
              'kaigi.signal-test
+             'kaigi.realtimekit-test
              'kaigi.recording-test
              'kaigi.turn-test)

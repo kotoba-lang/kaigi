@@ -134,3 +134,21 @@
     (is (= :mesh (:kaigi.plan/transport mesh)))
     (is (contains? mesh :kaigi.plan/peers))
     (is (not (contains? mesh :kaigi.plan/pull)))))
+
+(deftest realtimekit-wins-when-configured
+  (testing "they are alternatives, not layers — RealtimeKit is built ON the SFU"
+    (let [rk-cfg {:account-id "a" :app-id "b" :api-token "c" :preset "p"}
+          sfu-cfg {:app-id "a" :app-token "t"}]
+      (is (= :realtimekit (plan/transport rk-cfg)))
+      (is (= :sfu (plan/transport sfu-cfg)))
+      (is (= :realtimekit (plan/transport (merge sfu-cfg rk-cfg)))
+          "a deployment carrying both must behave predictably, not by check order")
+      (is (= :mesh (plan/transport {}))))))
+
+(deftest a-realtimekit-plan-has-no-subscription-opinion
+  (testing "the SDK owns track subscription; an empty diff would imply otherwise"
+    (let [p (plan/plan-for (three-way) sessions "jun" {}
+                           {:account-id "a" :app-id "b" :api-token "c" :preset "p"})]
+      (is (= :realtimekit (:kaigi.plan/transport p)))
+      (is (not (contains? p :kaigi.plan/pull)))
+      (is (not (contains? p :kaigi.plan/peers))))))
