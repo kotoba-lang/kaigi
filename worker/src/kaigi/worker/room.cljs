@@ -37,6 +37,7 @@
             [clojure.string :as str]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
+            [kaigi.realtimekit :as rk]
             [kaigi.recording :as recording]
             [kaigi.signal :as sig]
             [kaigi.turn :as turn]
@@ -100,12 +101,79 @@
 ;; ---------------------------------------------------------------------------
 
 (defn- config-of
-  "SFU configuration read off the Worker env. Absent bindings yield an empty
-  map, which `kaigi.plan/transport` reads as `:mesh` — the deployment
+  "Media configuration read off the Worker env — both planes at once.
+
+  `kaigi.plan/transport` picks between them (RealtimeKit first, then SFU, then
+  mesh). Absent bindings yield blanks, which reads as `:mesh` — the deployment
   degrades to a working mesh instead of failing to start."
   [env]
-  {:app-id    (some-> (aget env "REALTIME_APP_ID") str)
-   :app-token (some-> (aget env "REALTIME_APP_TOKEN") str)})
+  (merge {:app-id    (some-> (aget env "REALTIME_APP_ID") str)
+          :app-token (some-> (aget env "REALTIME_APP_TOKEN") str)}
+         (rk/config-from-env (fn [k] (aget env k)))))
+
+;; ---------------------------------------------------------------------------
+;; RealtimeKit: one meeting per room, one token per admitted participant
+;; ---------------------------------------------------------------------------
+
+(defn- rk-fetch!
+  "Send an authorized RealtimeKit request and parse the reply.
+
+  The token is attached here and nowhere else — `kaigi.realtimekit` builds
+  descriptors that carry no credential precisely so they can be logged."
+  [cfg req]
+  (let [authed (rk/authorize req (:api-token cfg))]
+    (-> (js/fetch (:kaigi.rk/url authed)
+                  #js {:method (str/upper-case (name (:kaigi.rk/method authed)))
+                       :headers (clj->js (:kaigi.rk/headers authed))
+                       :body (js/JSON.stringify (clj->js (:kaigi.rk/body authed)))})
+        (.then (fn [res] (.json res)))
+        (.then (fn [body] (rk/parse-response (js->clj body :keywordize-keys true)))))))
+
+(defn- ensure-rk-meeting!
+  "The RealtimeKit meeting id for this room, created on first need.
+
+  Created lazily rather than when the room wakes: a room nobody joins should
+  not allocate anything, and the id is durable state so it survives
+  hibernation and is created exactly once."
+  [ctx cfg mtg]
+  (let [existing (-> (current-state ctx) :rk-meeting-id)]
+    (if existing
+      (js/Promise.resolve existing)
+      (-> (rk-fetch! cfg (rk/create-meeting-request cfg {:title (:kaigi/title mtg)}))
+          (.then (fn [parsed]
+                   (if-let [id (rk/meeting-id parsed)]
+                     (do (put-state! ctx (assoc (current-state ctx) :rk-meeting-id id))
+                         (.put (.-storage ctx) "rk-meeting-id" id)
+                         id)
+                     (throw (ex-info "RealtimeKit meeting creation failed"
+                                     {:errors (:kaigi.rk/errors parsed)})))))))))
+
+(defn- rk-token!
+  "Mint a client token for `participant-id`, or nil when the model refuses.
+
+  `token-refusal` is consulted BEFORE the call, not after: a token that has
+  been issued is a join that is already possible, so there is no point at
+  which an issued token can be taken back."
+  [ctx env mtg participant-id]
+  (let [cfg (config-of env)]
+    (if-let [refusal (rk/token-refusal mtg participant-id)]
+      (js/Promise.resolve {:refused refusal})
+      (-> (ensure-rk-meeting! ctx cfg mtg)
+          (.then (fn [rk-id]
+                   (rk-fetch! cfg (rk/participant-request
+                                   cfg rk-id
+                                   {:participant-id participant-id
+                                    :display-name (:kaigi.participant/name
+                                                   (m/participant-by-id mtg participant-id))
+                                    :preset (:preset cfg)}))))
+          (.then (fn [parsed]
+                   (if-let [t (rk/participant-token parsed)]
+                     {:token t}
+                     {:refused {:kaigi.rk/reason :kaigi.rk/mint-failed
+                                :kaigi.rk/message (pr-str (:kaigi.rk/errors parsed))}})))
+          (.catch (fn [e]
+                    {:refused {:kaigi.rk/reason :kaigi.rk/unreachable
+                               :kaigi.rk/message (.-message e)}}))))))
 
 (defn- ice-servers
   "ICE servers for one participant, with a freshly minted TURN credential when
@@ -148,8 +216,18 @@
                    :kaigi/transport (plan/transport cfg)
                    :kaigi/ice-servers (ice-servers env (or id ""))})
         (when (and id (m/admitted? mtg id) (m/in-room? mtg id))
-          (send! ws {:t :plan
-                     :kaigi/plan (plan/plan-for mtg sessions id {} cfg)}))))))
+          (let [p (plan/plan-for mtg sessions id {} cfg)]
+            (if (= :realtimekit (:kaigi.plan/transport p))
+              ;; The plan for RealtimeKit is a token, not a topology: the SDK
+              ;; owns subscription. Minting is per participant and happens here
+              ;; because this is the only place that holds both the live
+              ;; meeting and the credential.
+              (-> (rk-token! ctx env mtg id)
+                  (.then (fn [{:keys [token refused]}]
+                           (send! ws (cond-> {:t :plan :kaigi/plan p}
+                                       token   (assoc :kaigi/rk-token token)
+                                       refused (assoc :kaigi/rk-refused refused))))))
+              (send! ws {:t :plan :kaigi/plan p}))))))))
 
 (defn- handle-hello
   "First frame on a socket: bind an identity and knock."
@@ -253,8 +331,10 @@
   [ctx meeting-id]
   (if-let [s (current-state ctx)]
     (js/Promise.resolve s)
-    (-> (restore ctx)
-        (.then (fn [stored]
+    (-> (js/Promise.all #js [(restore ctx) (.get (.-storage ctx) "rk-meeting-id")])
+        (.then (fn [res]
+                 (let [stored (aget res 0)
+                       rk-id (aget res 1)]
                  (put-state! ctx
                              {:meeting (or stored
                                            ;; A room woken with no stored
@@ -262,7 +342,8 @@
                                            ;; host yet: the first participant
                                            ;; to say hello becomes the host.
                                            (m/meeting meeting-id "" {:lobby :open}))
-                              :sessions {}}))))))
+                              :sessions {}
+                              :rk-meeting-id rk-id})))))))
 
 (defn- adopt-first-host
   "The first participant to arrive in a room with no host becomes it.

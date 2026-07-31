@@ -27,6 +27,8 @@
   comment records that this passed review more than once. Verify with
   `nbb verify-bundle.cljs`, which actually `import()`s the artifact."
   (:require [clojure.string :as str]
+            [kaigi.plan :as plan]
+            [kaigi.realtimekit :as rk]
             [kaigi.turn :as turn]
             [kaigi.worker.room :as room]))
 
@@ -112,16 +114,32 @@
      (cond
        (= path "/api/kaigi/health")
        (json 200 {:ok true
-                  :transport (if (and (aget env "REALTIME_APP_ID")
-                                      (aget env "REALTIME_APP_TOKEN"))
-                               "sfu" "mesh")
+                  ;; Reported through `plan/transport` rather than re-derived
+                  ;; here: two places deciding which plane is active is how a
+                  ;; health check comes to disagree with the rooms it reports on.
+                  :transport (name (plan/transport
+                                    (merge {:app-id (some-> (aget env "REALTIME_APP_ID") str)
+                                            :app-token (some-> (aget env "REALTIME_APP_TOKEN") str)}
+                                           (rk/config-from-env (fn [k] (aget env k))))))
                   ;; Not just "is TURN configured" but "does minting a
                   ;; credential actually work here". Those differ, and the
                   ;; difference is invisible from outside: a mint that throws
                   ;; inside the room takes the WebSocket down with a bare 1006
                   ;; and nothing in the logs. Reporting it here is what turns
                   ;; that into one curl.
-                  :turn (turn-status env)})
+                  :turn (turn-status env)
+                  ;; Which parts of the RealtimeKit configuration are present.
+                  ;; Names only, never values — the same reason `turn` reports
+                  ;; ok/absent/error rather than the secret: "configured" and
+                  ;; "actually reachable" are different questions, and a
+                  ;; transport that silently reads as mesh because ONE binding
+                  ;; is blank is invisible from outside.
+                  :realtimekit (let [cfg (rk/config-from-env (fn [k] (aget env k)))]
+                                 {:accountId (boolean (seq (str (:account-id cfg))))
+                                  :appId (boolean (seq (str (:app-id cfg))))
+                                  :apiToken (boolean (seq (str (:api-token cfg))))
+                                  :preset (boolean (seq (str (:preset cfg))))
+                                  :configured (rk/configured? cfg)})})
 
        ;; Recording upload. Routed to the room rather than to a bucket so the
        ;; Durable Object — the only holder of the live meeting — is what
