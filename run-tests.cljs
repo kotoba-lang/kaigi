@@ -26,6 +26,7 @@
             [kaigi.plan-test]
             [kaigi.sfu-test]
             [kaigi.signal-test]
+            [kaigi.recording-test]
             [kaigi.turn-test]))
 
 ;; cljs.test already prints the summary; this hook exists only so a failure
@@ -38,4 +39,5 @@
              'kaigi.plan-test
              'kaigi.sfu-test
              'kaigi.signal-test
+             'kaigi.recording-test
              'kaigi.turn-test)

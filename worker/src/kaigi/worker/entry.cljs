@@ -123,6 +123,15 @@
                   ;; that into one curl.
                   :turn (turn-status env)})
 
+       ;; Recording upload. Routed to the room rather than to a bucket so the
+       ;; Durable Object — the only holder of the live meeting — is what
+       ;; authorizes it. See kaigi.worker.room/upload-part!.
+       (and (= path "/api/kaigi/recording") (= "PUT" (.-method request)))
+       (let [meeting (or (.get (.-searchParams url) "meeting") "")]
+         (if (and (seq meeting) (re-matches meeting-id-pattern meeting))
+           (route-to-room env meeting request)
+           (json 400 {:error "meeting id must match [A-Za-z0-9_.:-]{1,128}"})))
+
        (= path "/api/kaigi/ws")
        (let [meeting (or (.get (.-searchParams url) "meeting") "")]
          (if (and (seq meeting) (re-matches meeting-id-pattern meeting))
