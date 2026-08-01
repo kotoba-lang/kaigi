@@ -21,7 +21,7 @@ persists it, and moves the bytes.
 | `kaigi.model` / `validate` / `plan` / `invite` / `sfu` / `signal` | **implemented** | 97 tests / 336 assertions green on **both** JVM and nbb |
 | DO signaling room (`kaigi.worker.*`) | **implemented, deployed** | 22/22 end-to-end checks against a real Worker |
 | Invitation flow (landing → code → link → pre-join) | **implemented** | 9/9 browser checks: `e2e-invite.cljs` |
-| Cloudflare **RealtimeKit** path | **wired end to end** | `e2e-realtimekit.cljs`; see "Two media planes" |
+| Cloudflare **RealtimeKit** path | **wired, deployed, exercised against the real service** | 5/5 in production: SDK joined both sides, each saw the other, **a remote video painting frames** |
 | Cloudflare Realtime **SFU** path | **implemented, retained, not the chosen path** | kept deliberately; see "Two media planes" |
 | Browser console (`kaigi.ui` + `kaigi.app`) | **implemented, deployed** | rendered page scores **100.00 / 0 findings** on the deterministic HIG/WCAG audit |
 | Real call (mesh) | **works** | two headless Chromium instances, ICE connected, **~190 KB of inbound RTP measured on each side** |
@@ -238,6 +238,22 @@ deployment running on the mesh never downloads a client it will not use. The
 vendor step asserts the global is still called `RealtimeKitClient` rather than
 copying blindly — a rename would otherwise ship a file that loads cleanly and
 defines nothing.
+
+### One RealtimeKit meeting per room, created exactly once
+
+A Durable Object is single-threaded but not single-*task*, and the difference
+is where this broke. The two `hello` frames of a two-person meeting land
+microseconds apart; both found `:rk-meeting-id` still nil while the first
+`create` was in the air, and both created one. Measured against production
+2026-08-01: **both tabs joined RealtimeKit successfully and each saw zero
+other participants**, because they were in two different RealtimeKit meetings.
+
+`rk-creating` memoizes the in-flight *promise* — an id cannot be memoized
+before it exists — in its own atom rather than in `room-states`, because that
+map is rewritten wholesale by `handle-frame` from a snapshot taken before
+`broadcast-state!` ran. It is cleared on rejection too: one transient error
+from the Cloudflare API must not leave every later join awaiting a promise
+that will never resolve.
 
 ### RealtimeKit does not replace `kaigi.model`
 
