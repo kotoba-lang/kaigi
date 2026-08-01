@@ -37,8 +37,19 @@
       (update :kaigi/participants dissoc "")))
 
 (defn -main []
-  (let [html (ui/render-page {:meeting placeholder
+  ;; `:prejoin`, not `:landing` and not `:meeting`.
+  ;;
+  ;; One document is served for every navigation, so this file has to pick the
+  ;; single view whose first paint is right most often — and the whole point of
+  ;; the invitation flow is that the URL people receive is `/?meeting=<code>`.
+  ;; That URL's first screen is the pre-join check, and its markup does not
+  ;; depend on the code, so it can be rendered honestly at build time. A bare
+  ;; `/` visit is the operator opening their own site; that one flips to the
+  ;; landing view on boot, which is the rarer flash to accept.
+  (let [html (ui/render-page {:view :prejoin
+                              :meeting placeholder
                               :me ""
+                              :display-name ""
                               :transport :mesh
                               :ice-servers [{:urls ["stun:stun.cloudflare.com:3478"]}]
                               :warning nil})]

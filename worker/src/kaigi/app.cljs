@@ -32,6 +32,7 @@
   swap."
   (:require [cljs.reader :as reader]
             [clojure.string :as str]
+            [kaigi.invite :as invite]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
             [kaigi.recording :as recording]
@@ -42,26 +43,104 @@
 ;; state
 ;; ---------------------------------------------------------------------------
 
+(def implemented-planes
+  "The media planes this bundle can actually carry a call on.
+
+  Declared to the room in `hello`, where it is intersected with what the
+  deployment is provisioned for. This is the client half of the fix for the
+  failure described in `kaigi.plan`: secrets for a plane the browser could not
+  drive turned a working meeting into a silent one, because a plan for an
+  unknown plane is a plan the client no-ops on.
+
+  So this set is the honest answer to \"what happens if the room says X\", and
+  it must grow only when the code that drives X lands — not when the code that
+  configures it does."
+  #{:realtimekit :mesh})
+
 (defonce state
   (atom {:socket nil
          :me nil
+         :display-name nil
+         :view :loading         ;; :loading | :landing | :prejoin | :meeting
          :meeting nil
          :transport :mesh
          :ice-servers []
          :warning nil
          :local-stream nil
+         :rk-meeting nil        ;; RealtimeKit meeting object, when on that plane
          :peers {}            ;; peer-id -> RTCPeerConnection
          :remote-streams {}}))  ;; peer-id -> MediaStream
 
 (defonce video-elements (atom {}))
 
+;; `dispatch!` names these before they are defined — the click handler is
+;; declared next to the acts it dispatches, while joining and copying belong
+;; next to the boot sequence and the clipboard they use. Declared rather than
+;; reordered so neither group has to be split.
+(declare join! copy-link! render!)
+
 (defn- meeting-id
-  "Room id from `?meeting=` or the hash, defaulting to `lobby`. Read from the
-  URL so a meeting is a shareable link and nothing else."
+  "Room id from `?meeting=` or the hash, or **nil** when the URL names none.
+  Read from the URL so a meeting is a shareable link and nothing else.
+
+  Nil rather than the old default of `\"lobby\"`. That default meant every
+  visitor who opened the bare site joined one shared room called `lobby`
+  together — the site had no front door, only a room whose name you got by
+  not asking for one. Nil is what makes a landing screen possible."
   []
   (let [p (.get (.-searchParams (js/URL. (.. js/window -location -href))) "meeting")
         h (str/replace (or (.. js/window -location -hash) "") #"^#" "")]
-    (or (not-empty p) (not-empty h) "lobby")))
+    (or (not-empty p) (not-empty h))))
+
+(def ^:private name-storage-key "kaigi/display-name")
+
+(defn- stored-name
+  "The display name this browser used last time, or nil.
+
+  `localStorage` throws rather than returning nil when the browser blocks it
+  (Safari private browsing, a third-party iframe), and an exception here would
+  stop `init` before the console rendered at all — a blank page because we
+  tried to remember a name."
+  []
+  (try (not-empty (.getItem js/localStorage name-storage-key))
+       (catch :default _ nil)))
+
+(defn- remember-name!
+  [n]
+  (try (.setItem js/localStorage name-storage-key n)
+       (catch :default _ nil)))
+
+(defn- new-meeting-code
+  "A fresh meeting code from the platform CSPRNG.
+
+  `crypto.getRandomValues`, not `Math.random`: the code is the only thing
+  standing between a meeting and anyone who wants to be in it, and
+  `Math.random` is seeded predictably enough that codes minted close together
+  are related. `kaigi.invite/meeting-code` takes the numbers as an argument
+  precisely so the source can be this rather than something testable-but-weak."
+  []
+  (let [buf (js/Uint32Array. invite/code-length)]
+    (.getRandomValues js/crypto buf)
+    (invite/meeting-code (array-seq buf))))
+
+(defn- field-value
+  "The current value of an input rendered by the design system, or \"\".
+
+  Read from the DOM rather than mirrored into `state` on every keystroke: the
+  console subtree is replaced wholesale on each render, so a controlled input
+  would lose focus and the caret position mid-word."
+  [id]
+  (or (some-> (js/document.getElementById id) .-value str/trim) ""))
+
+(defn- goto-meeting!
+  "Navigate to a meeting's own URL.
+
+  A real navigation, not a `pushState` + reconnect: the meeting id is read
+  from the URL in exactly one place, and a soft transition would create a
+  second path into the joined state that has to stay in agreement with it.
+  Reloading costs one page load at the one moment a person expects one."
+  [meeting-id]
+  (set! (.. js/window -location -href) (invite/join-path meeting-id)))
 
 (defn- my-id
   "A per-tab identity. `?me=` when given (the end-to-end harness needs to name
@@ -70,6 +149,22 @@
   []
   (or (not-empty (.get (.-searchParams (js/URL. (.. js/window -location -href))) "me"))
       (str "u-" (.slice (.toString (js/Math.random) 36) 2 8))))
+
+(defn- drivable-planes
+  "What this tab declares it can drive, narrowed by `?transport=<plane>`.
+
+  The narrowing is a test seam and a field diagnostic, in the same spirit as
+  `?ice=relay`: it answers \"does this call work without RealtimeKit?\" without
+  touching the deployment's secrets, and it is what lets the end-to-end media
+  harness prove the mesh path still carries RTP on a Worker that is configured
+  for RealtimeKit. Narrowing only — a tab cannot use it to claim a plane the
+  bundle has no code for."
+  []
+  (let [asked (.get (.-searchParams (js/URL. (.. js/window -location -href))) "transport")
+        want  (some-> (not-empty asked) keyword)]
+    (if (contains? implemented-planes want)
+      #{want}
+      implemented-planes)))
 
 ;; ---------------------------------------------------------------------------
 ;; wire
@@ -135,20 +230,58 @@
 ;; render
 ;; ---------------------------------------------------------------------------
 
+(defn- fold-fields!
+  "Move whatever is currently typed into the text fields back into `state`.
+
+  `render!` replaces the console subtree wholesale, which destroys the input
+  elements inside it — so anything typed and not yet folded in is gone at the
+  next render. The re-rendered field takes its value from `state`, so folding
+  first is what makes the swap invisible to someone mid-word.
+
+  The case that made this necessary is the first render of all. The join
+  screen ships in the SSR'd document, so the name field is on screen and
+  typeable before the bundle has booted; `init` then renders and wipes it.
+  Measured 2026-08-01 — the invitation harness typed a name into the SSR'd
+  field, `init` replaced it a moment later, and the participant joined under
+  the random per-tab id it was supposed to replace. A person who starts typing
+  the instant the page paints loses exactly the same way."
+  []
+  (when-let [el (js/document.getElementById kui/name-field-id)]
+    (swap! state assoc :display-name (not-empty (str/trim (str (.-value el))))))
+  (when-let [el (js/document.getElementById kui/code-field-id)]
+    (swap! state assoc :code-input (str (.-value el)))))
+
 (defn render!
   []
-  (let [{:keys [meeting me transport ice-servers warning]} @state]
-    (when meeting
-      (let [html (ui/->html (kui/console {:meeting meeting :me me
-                                          :transport transport
-                                          :ice-servers ice-servers
-                                          :warning warning}))]
-        ;; Replace the shell's content, not the whole document: the SSR page
-        ;; already carries the theme CSS in <head>, and re-writing <head>
-        ;; would re-parse the stylesheet on every roster change.
-        (when-let [root (js/document.getElementById "kaigi-console")]
-          (set! (.-outerHTML root) html))
-        (attach-videos!)))))
+  (fold-fields!)
+  (let [{:keys [view meeting me display-name transport ice-servers warning
+                copied? media-refused? code-error code-input]} @state
+        code (meeting-id)
+        html (ui/->html (kui/console {:view view
+                                      :meeting meeting :me me
+                                      :display-name display-name
+                                      :transport transport
+                                      :ice-servers ice-servers
+                                      :warning warning
+                                      :code (when (invite/code? code) code)
+                                      :url (when code
+                                             (invite/join-url
+                                              (.. js/window -location -origin) code))
+                                      :copied? copied?
+                                      :media-refused? media-refused?
+                                      :code-error code-error
+                                      :code-input code-input}))]
+    ;; No `(when meeting …)` guard any more: the landing and pre-join screens
+    ;; exist precisely to be rendered BEFORE there is a meeting value, and the
+    ;; guard is what used to leave the SSR shell frozen on screen until the
+    ;; first roster arrived.
+    ;;
+    ;; Replace the shell's content, not the whole document: the SSR page
+    ;; already carries the theme CSS in <head>, and re-writing <head> would
+    ;; re-parse the stylesheet on every roster change.
+    (when-let [root (js/document.getElementById "kaigi-console")]
+      (set! (.-outerHTML root) html))
+    (attach-videos!)))
 
 ;; ---------------------------------------------------------------------------
 ;; peer connections
@@ -253,6 +386,164 @@
       (doseq [{:kaigi.plan/keys [peer-id role]} peers]
         (when (and (= :offerer role) (not (get-in @state [:peers peer-id])))
           (offer-to! peer-id))))))
+
+;; ---------------------------------------------------------------------------
+;; RealtimeKit
+;;
+;; The other media plane. Where the mesh has this file build a PeerConnection
+;; per peer, RealtimeKit is handed a token and owns transport, subscription and
+;; simulcast itself — so the whole of kaigi's part is: join with the token the
+;; room minted, and put the tracks it hands back into the tiles the roster
+;; already rendered.
+;;
+;; Identity is the seam that makes that possible. `kaigi.realtimekit` mints
+;; every token with `custom_participant_id` set to kaigi's own participant id,
+;; so a RealtimeKit participant maps to a roster row with no lookup table —
+;; and no table means no stale table, which is the failure that would put one
+;; person's video under another person's name.
+;;
+;; `kaigi.model` remains the authority for admission, roles and consent;
+;; RealtimeKit never learns there is a lobby. It does not need to: the room
+;; refuses to mint a token for anyone the model has not admitted, and a
+;; meeting you have no token for is a meeting you cannot join.
+;; ---------------------------------------------------------------------------
+
+(def ^:private rk-sdk-url
+  "The vendored SDK, served as a static asset next to the app bundle.
+  `vendor-realtimekit.cljs` puts it there; the version is pinned by
+  `package.json`."
+  "/js/realtimekit.js")
+
+(defn- rk-sdk!
+  "Resolve to the RealtimeKit client class, loading the SDK on first use.
+
+  A `<script>` tag rather than a `:require`, and this is not a style choice.
+  The published package's CommonJS entry contains `super()` inside an arrow
+  function, which the Closure compiler refuses outright — measured
+  2026-08-01, `shadow-cljs release app` fails with `closure-compiler does not
+  allow calls to super() in arrow functions` at
+  `@cloudflare/realtimekit/dist/index.cjs.js:8`. The package also ships
+  `dist/browser.js`, a prebuilt IIFE that assigns the client to a global, and
+  that file needs no bundler at all.
+
+  Vendoring it is the more honest arrangement anyway: a 650 KB third-party
+  blob is not source this repo compiles, and keeping it out of the app bundle
+  means a deployment on the mesh never downloads a megabyte of SFU client it
+  will not use.
+
+  Loaded once. The promise is cached in `state` rather than the tag being
+  re-appended, because two plan frames arriving together would otherwise start
+  two loads and the second would clobber a half-initialized global."
+  []
+  (or (:rk-sdk @state)
+      (let [p (js/Promise.
+               (fn [resolve reject]
+                 (if-let [existing (.-RealtimeKitClient js/window)]
+                   (resolve existing)
+                   (let [el (js/document.createElement "script")]
+                     (set! (.-src el) rk-sdk-url)
+                     (set! (.-async el) true)
+                     (set! (.-onload el)
+                           (fn [_]
+                             (if-let [client (.-RealtimeKitClient js/window)]
+                               (resolve client)
+                               ;; Loaded but absent means the vendored file is
+                               ;; stale or the wrong build — a specific failure
+                               ;; worth naming, because the symptom otherwise is
+                               ;; an undefined call deep inside a `.then`.
+                               (reject (js/Error. (str rk-sdk-url " loaded but defined no RealtimeKitClient"))))))
+                     (set! (.-onerror el)
+                           (fn [_] (reject (js/Error. (str "failed to load " rk-sdk-url)))))
+                     (.appendChild (.-head js/document) el)))))]
+        (swap! state assoc :rk-sdk p)
+        p)))
+
+(defn- rk-participant-id
+  "The kaigi participant id behind a RealtimeKit participant object.
+
+  `customParticipantId` is what the room set when minting the token. The
+  fallbacks are not optimism — they are what keeps an SDK field rename from
+  silently attaching every remote stream to nobody."
+  [p]
+  (or (not-empty (str (.-customParticipantId p)))
+      (not-empty (str (.-userId p)))
+      (not-empty (str (.-id p)))))
+
+(defn- rk-attach-track!
+  "Put one remote track into `participant-id`'s existing `<video>`.
+
+  Tracks arrive one at a time and in no particular order, so the stream is
+  built up rather than replaced: assigning a fresh `MediaStream` on the audio
+  update would drop the video that arrived a moment earlier, which presents as
+  a call you can hear but not see."
+  [participant-id track]
+  (when (and participant-id track)
+    (let [el (video-for participant-id false)
+          existing (.-srcObject el)]
+      (if existing
+        (when-not (some #(= (.-id %) (.-id track)) (array-seq (.getTracks existing)))
+          (.addTrack existing track))
+        (set! (.-srcObject el) (js/MediaStream. #js [track])))
+      (attach-videos!))))
+
+(defn- rk-wire-participant!
+  [p]
+  (let [pid (rk-participant-id p)]
+    (rk-attach-track! pid (.-videoTrack p))
+    (rk-attach-track! pid (.-audioTrack p))))
+
+(defn- rk-join!
+  "Join the RealtimeKit meeting with the token the room minted.
+
+  Idempotent: `broadcast-state!` re-sends a plan on every roster change, and
+  each of those carries a token. Joining twice would put two participants on
+  the plane under one id, both publishing, and the roster would show a person
+  talking to themselves."
+  [token]
+  (when-not (:rk-meeting @state)
+    ;; Claim the slot before the await, not after: two plan frames can arrive
+    ;; in the same tick and both would pass an `if` that only resolves later.
+    (swap! state assoc :rk-meeting :joining)
+    (-> (rk-sdk!)
+        (.then (fn [client]
+                 (.init client #js {:authToken token
+                                    :defaults #js {:audio true :video true}})))
+        (.then (fn [meeting]
+                 (swap! state assoc :rk-meeting meeting)
+                 (let [self (.-self meeting)
+                       joined (.. meeting -participants -joined)]
+                   ;; Own preview stays local: `capture!` already has a stream
+                   ;; on screen, and rendering the round trip instead would
+                   ;; show a delayed copy of yourself.
+                   (.on joined "participantJoined"
+                        (fn [p] (rk-wire-participant! p)))
+                   (.on joined "videoUpdate"
+                        (fn [p _] (rk-attach-track! (rk-participant-id p) (.-videoTrack p))))
+                   (.on joined "audioUpdate"
+                        (fn [p _] (rk-attach-track! (rk-participant-id p) (.-audioTrack p))))
+                   ;; `drop-peer!` and not a RealtimeKit-specific teardown:
+                   ;; on this plane there is no PeerConnection to close, so it
+                   ;; reduces to detaching and forgetting the `<video>` — which
+                   ;; is exactly the cleanup needed, and is one code path
+                   ;; instead of two that have to stay in agreement.
+                   (.on joined "participantLeft"
+                        (fn [p] (some-> (rk-participant-id p) drop-peer!)))
+                   (.on self "roomJoined"
+                        (fn []
+                          (js/console.info "[kaigi] realtimekit room joined")
+                          ;; Everyone already in the room when this tab
+                          ;; arrives fires no `participantJoined` — without
+                          ;; this sweep a late joiner sees only the people who
+                          ;; join after it.
+                          (doseq [p (array-seq (.toArray joined))]
+                            (rk-wire-participant! p))))
+                   (.joinRoom meeting))))
+        (.catch (fn [e]
+                  ;; Cleared, so a later plan frame can try again: a token that
+                  ;; expired while this tab sat on the pre-join screen must not
+                  ;; leave the plane permanently unjoinable.
+                  (swap! state assoc :rk-meeting nil)
+                  (js/console.error "[kaigi] realtimekit join failed" (.-message e)))))))
 
 ;; ---------------------------------------------------------------------------
 ;; inbound signaling
@@ -366,7 +657,16 @@
     :plan  (let [p (:kaigi/plan frame)]
              (swap! state assoc :warning (:kaigi.plan/warning p))
              (render!)
-             (apply-plan! p))
+             (apply-plan! p)
+             (when (= :realtimekit (:kaigi.plan/transport p))
+               (if-let [token (:kaigi/rk-token frame)]
+                 (rk-join! token)
+                 ;; A refusal is the model saying this participant is not
+                 ;; admitted — a lobby, not a fault. Logged at info, because
+                 ;; an error here would make the normal act of waiting to be
+                 ;; let in look like something went wrong.
+                 (js/console.info "[kaigi] no realtimekit token:"
+                                  (pr-str (:kaigi/rk-refused frame))))))
     :signal (handle-signal! (:kaigi/from frame) (:kaigi/payload frame))
     :error (js/console.warn "[kaigi]" (str (:kaigi/code frame)) (:kaigi/message frame))
     (js/console.warn "[kaigi] unknown frame" (pr-str (:t frame)))))
@@ -403,11 +703,30 @@
     (array-seq (if (= :audio kind) (.getAudioTracks s) (.getVideoTracks s)))))
 
 (defn- set-track-enabled!
-  "Enable/disable local tracks. `enabled = false` stops transmitting while
-  keeping the transceiver, so muting does not renegotiate the connection."
+  "Enable/disable local media, on whichever plane is carrying it.
+
+  On the mesh this flips `track.enabled`, which stops transmitting while
+  keeping the transceiver, so muting does not renegotiate the connection. On
+  RealtimeKit the SDK owns the publication, and toggling the raw track behind
+  its back leaves it publishing silence while reporting the microphone as
+  live — so the same act has to be spoken to whoever is actually holding the
+  track.
+
+  Both are driven, not one or the other: the local `<video>` preview is fed by
+  `capture!`'s stream on every plane, so a camera that is off must also be off
+  there or you watch yourself on a camera you believe you disabled."
   [kind enabled?]
   (doseq [t (local-tracks kind)]
-    (set! (.-enabled t) enabled?)))
+    (set! (.-enabled t) enabled?))
+  (let [mtg (:rk-meeting @state)]
+    (when (and mtg (not= :joining mtg))
+      (let [self (.-self mtg)]
+        (case [kind enabled?]
+          [:audio true]  (.enableAudio self)
+          [:audio false] (.disableAudio self)
+          [:video true]  (.enableVideo self)
+          [:video false] (.disableVideo self)
+          nil)))))
 
 (defn- dispatch!
   "Act on a `data-act` value.
@@ -425,6 +744,29 @@
         me (:me @state)
         p (m/participant-by-id mtg me)]
     (case act
+      ;; Getting in. These three run before there is a meeting value at all,
+      ;; so they are matched ahead of everything that reads the roster.
+      "new-meeting" (goto-meeting! (new-meeting-code))
+      "join-code"
+      ;; Read straight from the DOM, not from `state`: `render!` folds the
+      ;; field in on its way past, but nothing has re-rendered between the
+      ;; last keystroke and this click.
+      (if-let [code (invite/normalize-code (field-value kui/code-field-id))]
+        (goto-meeting! code)
+        ;; Refused rather than guessed at, and refused *in the page*. A code
+        ;; that is not `code-length` letters is a typo, and navigating to it
+        ;; would create an empty meeting with the typo as its id — which looks
+        ;; exactly like the meeting you meant, with nobody in it.
+        ;;
+        ;; Not `alert()`: a modal dialog blocks every subsequent event in the
+        ;; tab, which takes the end-to-end harness (and any browser
+        ;; automation) down with it, and it loses the typed code behind a box
+        ;; you have to dismiss before you can fix it.
+        (do (swap! state assoc :code-error "会議コードは英字10文字です（例: abc-defg-hij）。")
+            (render!)))
+      "join" (join!)
+      "copy-link" (copy-link!)
+
       "admit"  (control! :admit target)
       "deny"   (control! :deny target)
       "remove" (control! :remove target)
@@ -447,6 +789,27 @@
       "start-recording" (control! :start-recording)
       "stop-recording" (control! :stop-recording nil "")
       (js/console.debug "[kaigi] unhandled act" act))))
+
+(defn- copy-link!
+  "Put the invitation on the clipboard and say so.
+
+  The confirmation is state that a later render clears, not a class poked onto
+  the button: the console subtree is replaced wholesale on every render, so
+  anything written straight to the DOM disappears at the next roster change
+  with no way to tell whether the copy worked."
+  []
+  (let [url (invite/join-url (.. js/window -location -origin) (meeting-id))]
+    (-> (.writeText (.-clipboard js/navigator) url)
+        (.then (fn [_]
+                 (swap! state assoc :copied? true)
+                 (render!)
+                 (js/setTimeout (fn [] (swap! state assoc :copied? false) (render!))
+                                2000)))
+        ;; `navigator.clipboard` rejects without a user gesture and is absent
+        ;; entirely on insecure origins. The URL is on screen either way, so
+        ;; the honest failure is to leave it selectable rather than to claim a
+        ;; copy that did not happen.
+        (.catch (fn [e] (js/console.warn "[kaigi] clipboard refused" (.-message e)))))))
 
 (defn- install-click-handler!
   "One delegated listener on the document.
@@ -473,12 +836,23 @@
         url (str proto "//" (.. js/window -location -host)
                  "/api/kaigi/ws?meeting=" (js/encodeURIComponent (meeting-id)))
         ws (js/WebSocket. url)
-        me (my-id)]
+        ;; The id is minted in `init`, not here: the pre-join preview attaches
+        ;; its `<video>` under this id before the socket exists, and minting a
+        ;; second one at connect time would leave that element orphaned under
+        ;; a name no tile ever carries.
+        me (:me @state)]
     (js/console.info "[kaigi] connecting" url "as" me)
-    (swap! state assoc :socket ws :me me)
+    (swap! state assoc :socket ws)
     (set! (.-onopen ws)
           (fn [_] (send! {:t :hello :kaigi/participant-id me
-                          :kaigi/name me})))
+                          :kaigi/name (or (not-empty (:display-name @state)) me)
+                          ;; What THIS bundle can actually drive. The room
+                          ;; intersects it across the roster and picks a plane
+                          ;; everyone can use. Declaring it is what stops a
+                          ;; deployment whose secrets got ahead of its bundle
+                          ;; from carrying no media at all — see
+                          ;; `kaigi.plan`'s namespace docstring.
+                          :kaigi/transports (drivable-planes)})))
     (set! (.-onmessage ws)
           (fn [ev]
             (try (handle-frame! (reader/read-string (.-data ev)))
@@ -489,6 +863,42 @@
           (fn [ev] (js/console.warn "[kaigi] socket closed" (.-code ev) (.-reason ev))))
     ws))
 
+(defn- join!
+  "Leave the pre-join screen and actually enter the meeting.
+
+  The name is read once, here, and then travels in `hello`. Committing it to
+  `localStorage` at the same moment is what makes the second meeting not ask
+  again — the field is pre-filled and the button is the only thing to press.
+
+  **Waits for `capture!` before opening the socket.** The join button is part
+  of the SSR'd document, so it is on screen and clickable from the first
+  paint — before `getUserMedia` has resolved, and on a cold load before the
+  camera permission prompt has even been answered. Connecting then produces an
+  offer with no tracks in it at all: `ensure-peer!` finds no local stream, the
+  session negotiates zero m-lines, ICE never runs, and both tabs sit at one
+  PeerConnection each with nothing flowing.
+
+  Measured 2026-08-01 while building this screen — the end-to-end harness
+  clicked 参加 the instant the selector appeared and the run reported a
+  two-person roster, one peer per side, no ICE and zero RTP. A person on a
+  fast connection presses the button just as eagerly.
+
+  Awaiting is enough; the button does not need disabling. A capture that fails
+  resolves to nil and the join proceeds without media, which is a normal
+  outcome (`capture!`'s docstring) rather than something to block on."
+  []
+  (let [n (or (not-empty (field-value kui/name-field-id))
+              ;; The field may already be gone — `render!` folds it into state
+              ;; on the way past, and a render can land between the keystroke
+              ;; and this click.
+              (not-empty (:display-name @state)))]
+    (when n (remember-name! n))
+    (swap! state assoc :display-name n :view :meeting)
+    (render!)
+    (-> (or (:capture @state) (js/Promise.resolve nil))
+        (.then (fn [_] (connect!)))
+        (.catch (fn [_] (connect!))))))
+
 (defn ^:export init
   []
   ;; Lifecycle logging is not debug scaffolding left behind: joining a call has
@@ -497,19 +907,48 @@
   ;; blank grid. These lines are what tell an operator which step stopped.
   (js/console.info "[kaigi] init")
   (install-click-handler!)
-  ;; Media first, then connect: a peer that answers an offer before its local
-  ;; tracks exist negotiates an audio/video-less session and stays silent even
-  ;; though the connection reports `connected`.
-  (-> (capture!)
-      (.then (fn [_] (connect!)))))
+  (swap! state assoc :me (my-id) :display-name (stored-name))
+  (if-not (meeting-id)
+    ;; No meeting in the URL: this is someone's first visit, not a join. Show
+    ;; the front door and do NOT touch the camera — asking for a device
+    ;; permission on a page with no call on it is how a site gets its
+    ;; permission denied permanently.
+    (do (swap! state assoc :view :landing)
+        (render!))
+    ;; A meeting link. Capture first and show the preview, then wait for the
+    ;; person to press 参加.
+    ;;
+    ;; Media before the socket for the same reason it always was: a peer that
+    ;; answers an offer before its local tracks exist negotiates a session with
+    ;; no audio or video in it and stays silent while reporting `connected`.
+    ;; The pre-join screen makes that ordering something a person can see
+    ;; rather than something the code has to remember.
+    (do (swap! state assoc :view :prejoin)
+        (render!)
+        ;; The promise is kept, not just its result: `join!` awaits it, because
+        ;; the join button is on screen from the first paint and is reliably
+        ;; pressed before this resolves.
+        (swap! state assoc :capture
+               (-> (capture!)
+                   (.then (fn [stream]
+                            (when-not stream
+                              (swap! state assoc :media-refused? true))
+                            (render!)
+                            stream)))))))
 
 ;; Introspection seam for the end-to-end harness. Exposed deliberately and
 ;; narrowly: the browser test needs to read connection state and RTP counters,
 ;; which are the only evidence that media actually flowed rather than that the
 ;; UI merely looks right.
 (set! (.-kaigi js/window)
+      ;; The dissoc list is a serialization boundary, not tidiness. Playwright
+      ;; structurally clones whatever `evaluate` returns, and the RealtimeKit
+      ;; meeting is a live object graph holding sockets and media tracks —
+      ;; returning it either throws or ships megabytes. The promises are
+      ;; uncloneable for the same reason.
       #js {:state (fn [] (clj->js (dissoc @state :socket :local-stream
-                                          :peers :remote-streams)))
+                                          :peers :remote-streams
+                                          :rk-meeting :rk-sdk :capture)))
            :participantCount (fn [] (count (m/admitted-ids (:meeting @state))))
            :peerIds (fn [] (clj->js (vec (keys (:peers @state)))))
            :iceTransportPolicy (fn [] (ice-transport-policy))
@@ -543,6 +982,20 @@
                                                          (= (.-id s) @found))
                                                 (reset! t (.-candidateType s)))))
                                   @t))))))))) 
+           ;; RealtimeKit has no RTCPeerConnection this file can see — the SDK
+           ;; owns transport — so `peerIds`/`inboundBytes` read empty on that
+           ;; plane and cannot be the evidence a call happened. This is what an
+           ;; end-to-end run asserts instead: the SDK reports a joined room with
+           ;; other people in it, and (in the harness) a remote `<video>` that
+           ;; is painting frames.
+           :realtimekit
+           (fn []
+             (let [m (:rk-meeting @state)
+                   live? (and (some? m) (not= :joining m))]
+               (clj->js {:joined live?
+                         :others (if live?
+                                   (.-length (.toArray (.. m -participants -joined)))
+                                   0)})))
            :recording (fn [] (clj->js {:running (boolean (:mr @recorder))
                                        :parts (:seq @recorder)}))
            :connectionStates (fn []

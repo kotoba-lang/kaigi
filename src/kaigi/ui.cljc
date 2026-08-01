@@ -30,6 +30,7 @@
   handlers are baked into the hiccup and the SSR and browser output are
   identical for identical data."
   (:require [clojure.string :as str]
+            [kaigi.invite :as invite]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
             [kotoba-ui.core :as ui]))
@@ -269,6 +270,100 @@
        {:class "kaigi-ice"}))))
 
 ;; ---------------------------------------------------------------------------
+;; getting in: landing, the invitation, and the pre-join check
+;; ---------------------------------------------------------------------------
+
+(def name-field-id "kaigi-name")
+(def code-field-id "kaigi-code")
+
+(defn landing
+  "What a bare URL shows: start a meeting, or type a code someone read out.
+
+  The bare URL used to join a meeting literally called `lobby`, so everyone
+  who opened the site with no query string was dropped into one shared room
+  together. Two strangers in the same call is the worst possible default, and
+  it happened silently."
+  [{:keys [code-error code-input]}]
+  (ui/stack
+   {:gap :5}
+   (ui/hero {:title "kaigi 会議"
+             :tagline "リンクを送るだけで会議が始まります。アカウントは要りません。"
+             :actions [(ui/button "新しい会議を開始" {:act :new-meeting})]})
+   (ui/panel
+    [[:h3 "会議コードで参加"]
+     (ui/stack
+      {:direction :horizontal :gap :3 :class "kaigi-code-row"}
+      (ui/text-field {:id code-field-id
+                      ;; Re-rendering the landing (to show a refusal) would
+                      ;; otherwise clear the code that was just refused, so the
+                      ;; error would appear next to an empty field and fixing a
+                      ;; typo would mean typing the whole thing again.
+                      :value (str code-input)
+                      :placeholder "abc-defg-hij"
+                      :aria-label "会議コード"
+                      :autocomplete "off"
+                      :spellcheck "false"})
+      (ui/button "参加" {:act :join-code}))
+     (if code-error
+       ;; `role="alert"` so a screen reader hears the refusal: this message
+       ;; appears in place, without focus moving to it, which is silence to
+       ;; anyone not looking at that corner of the screen.
+       [:p {:class "hig-footnote kaigi-error" :role "alert"} code-error]
+       [:p {:class "hig-footnote"}
+        "ハイフンは省略できます。大文字・小文字は区別しません。"])])))
+
+(defn invitation
+  "The shareable link for this meeting, and one button that copies it.
+
+  Shown inside the meeting rather than only before it: the moment someone
+  realises a person is missing is the moment they are already in the call, and
+  a link they have to leave to find is a link they send from a different app
+  with a typo in it."
+  [{:keys [code url copied?]}]
+  (when (seq (str url))
+    (ui/panel
+     [[:h3 "この会議に招待"]
+      [:p {:class "hig-body kaigi-invite__url"} (str url)]
+      (ui/stack
+       {:direction :horizontal :gap :3}
+       (ui/button (if copied? "コピーしました" "リンクをコピー") {:act :copy-link})
+       (ui/spacer)
+       (when (seq (str code))
+         [:span {:class "hig-footnote"} (str "会議コード: " code)]))]
+     {:class "kaigi-invite"})))
+
+(defn prejoin
+  "The check before joining: how you will look and what you will be called.
+
+  This screen is why the roster stopped reading `u-a1b2c3`. A name was always
+  accepted by `hello` — nothing ever asked for one, so the client sent the
+  random per-tab id as the display name and every participant appeared as a
+  string of hex.
+
+  The camera preview shares `data-kaigi-participant` with the meeting tiles,
+  so `kaigi.app` moves the same `<video>` element from here into the grid
+  rather than creating a second one — the preview and the call are the same
+  stream, and the transition costs no renegotiation."
+  [{:keys [me display-name code url copied? media-refused?]}]
+  (ui/stack
+   {:gap :4}
+   (ui/panel
+    [[:h3 "参加の準備"]
+     [:div {:class "kaigi-tile__media kaigi-preview" :data-kaigi-participant (str me)}
+      (when media-refused?
+        [:div {:class "kaigi-tile__avatar" :aria-hidden "true"} "🎥"])]
+     (when media-refused?
+       [:p {:class "hig-footnote"}
+        "カメラとマイクを使えません。音声・映像なしでも参加できます。"])
+     (ui/text-field {:id name-field-id
+                     :value (str display-name)
+                     :placeholder "名前"
+                     :aria-label "表示名"
+                     :autocomplete "name"})
+     (ui/button "今すぐ参加" {:act :join})])
+   (invitation {:code code :url url :copied? copied?})))
+
+;; ---------------------------------------------------------------------------
 ;; page
 ;; ---------------------------------------------------------------------------
 
@@ -284,15 +379,12 @@
   second nav bar) inside the first on the very first live render."
   "kaigi-console")
 
-(defn console
-  "The re-rendered region: one participant's view of one meeting.
-
-  Returns the `#kaigi-console` element itself. `render-page` wraps it in the
-  page shell for SSR; the browser swaps this element in place."
-  [{:keys [meeting me transport ice-servers warning]}]
+(defn in-meeting
+  "One participant's view of one meeting."
+  [{:keys [meeting me transport ice-servers warning] :as opts}]
   (let [mtg meeting]
     (ui/stack
-     {:gap :4 :id console-root-id}
+     {:gap :4}
      (waiting-notice mtg me)
      (lobby-queue mtg me)
      (transport-notice transport warning)
@@ -301,7 +393,30 @@
        (ui/stack {:gap :4}
                  (participant-grid mtg me)
                  (controls mtg me)
-                 (recording-panel mtg me))))))
+                 (recording-panel mtg me)
+                 (invitation opts))))))
+
+(defn console
+  "The re-rendered region, whichever of the three screens it is showing.
+
+  Returns the `#kaigi-console` element itself. `render-page` wraps it in the
+  page shell for SSR; the browser swaps this element in place.
+
+  One swap target for all three views rather than three: `kaigi.app` replaces
+  this element's `outerHTML` wholesale, and a second target would mean a
+  second place that has to be kept in sync with which view is current — which
+  is how you get two screens rendered at once.
+
+  `:view` defaults to `:meeting` so every existing caller — the tests and
+  anything that passes only a meeting — keeps its old behaviour."
+  [{:keys [view] :as opts}]
+  (ui/stack
+   {:gap :4 :id console-root-id}
+   (case (or view :meeting)
+     :landing (landing opts)
+     :prejoin (prejoin opts)
+     :loading (ui/panel [[:p {:class "hig-callout"} "接続しています…"]])
+     (in-meeting opts))))
 
 (defn page-shell
   "The static frame around `console`: nav and app chrome.
@@ -331,7 +446,18 @@
    ".kaigi-tile--sharing .kaigi-tile__media{outline:var(--hig-hairline) solid var(--hig-palette-blue);}"
    ".kaigi-badge{padding:0 var(--hig-spacing-1);border-radius:var(--hig-radius-small);"
    "background:var(--hig-fill-secondary);color:var(--hig-label-secondary);}"
-   ".kaigi-queue-row{align-items:center;}"))
+   ".kaigi-queue-row{align-items:center;}"
+   ;; The pre-join preview is the same tile geometry as a grid tile, capped so
+   ;; it does not fill a desktop viewport — it is a mirror to check yourself
+   ;; in, not the meeting.
+   ".kaigi-preview{max-width:32rem;margin-inline:auto;}"
+   ;; A URL is one unbroken token, so it overflows every container it is put
+   ;; in unless told otherwise. `anywhere` rather than `break-all` so it still
+   ;; prefers to break at the slashes.
+   ".kaigi-invite__url{overflow-wrap:anywhere;color:var(--hig-label-secondary);}"
+   ".kaigi-code-row{align-items:center;}"
+   ".kaigi-code-row>*:first-child{flex:1 1 auto;}"
+   ".kaigi-error{color:var(--hig-palette-red);}"))
 
 (defn render-page
   "The complete SSR document. `opts` as `console`."

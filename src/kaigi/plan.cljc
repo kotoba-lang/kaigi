@@ -8,15 +8,40 @@
 
   ## Two transports, one decision function
 
-  `transport` picks `:sfu` when a Cloudflare Realtime app is configured and
-  `:mesh` when it is not. The choice is a function of configuration, not of
-  participant count, so a deployment behaves the same on every join instead
-  of switching topology mid-meeting and having to renegotiate everything.
+  `transport` picks the best plane the deployment is *provisioned* for and
+  every connected client can actually *drive*. The choice is a function of
+  configuration and client capability, not of participant count, so a
+  deployment behaves the same on every join instead of switching topology
+  mid-meeting and having to renegotiate everything.
 
   The mesh path exists because it needs no external credential and works
   today; it is honest about its ceiling (`mesh-viable?`). The SFU path is the
   one that scales, because each participant then uploads once regardless of
   how many people are watching.
+
+  ## Why the client gets a vote
+
+  Configuration alone decided this once, and the failure it produced is the
+  reason it no longer does. `REALTIMEKIT_*` secrets were set on the live
+  Worker while the browser bundle could still only drive the mesh; `transport`
+  duly reported `:realtimekit`, the client's plan applier no-opped on
+  everything that was not `:mesh`, and the deployment carried **no media at
+  all** — a full roster, working controls, mute propagating between tabs, and
+  zero PeerConnections. Measured 2026-08-01: 0 inbound RTP bytes on both
+  sides, with nothing in any log naming the cause.
+
+  A plane nobody in the room can drive is not a plane. So a client declares
+  what it can drive in its `hello`, `negotiate` intersects those declarations
+  with what is configured, and a deployment that gets ahead of its own bundle
+  degrades to a working mesh instead of to silence.
+
+  This does mean the plane can change when a client with a stale bundle joins.
+  That is a different thing from switching on headcount, which is what the
+  \"configuration, not headcount\" rule forbids: headcount changes constantly
+  and tells you nothing about what will work, whereas a participant who
+  literally cannot drive the current plane is a meeting that is about to be
+  silent for them. Everyone moving together to a plane everyone can drive is
+  the only outcome in which the call still happens.
 
   ## Diffs, not rebuilds
 
@@ -24,7 +49,8 @@
   participant already has would renegotiate the PeerConnection on every
   roster change, which is visible as a video freeze for everyone — so the
   plan is always expressed as `pull these, close those`."
-  (:require [kaigi.model :as m]
+  (:require [clojure.set :as set]
+            [kaigi.model :as m]
             [kaigi.realtimekit :as rk]
             [kaigi.sfu :as sfu]
             [kotoba.webrtc.room :as room]))
@@ -40,27 +66,71 @@
   than saying the meeting outgrew the transport."
   4)
 
-(defn transport
-  "Which media plane carries this meeting: `:realtimekit`, `:sfu` or `:mesh`.
+(def planes
+  "Every media plane kaigi can carry a meeting on, best first.
 
-  Configuration decides, not headcount, so a deployment behaves the same on
-  every join instead of switching topology mid-meeting.
+  `transport` walks this in order, so preference is stated once here rather
+  than being implied by the order of branches in a `cond`. RealtimeKit wins
+  over the SFU when both are configured: they are alternatives rather than
+  layers — RealtimeKit is built on the SFU, so running against both at once
+  would mean two systems allocating tracks for the same participants — and a
+  deployment that somehow carried both should behave predictably rather than
+  by accident of check order."
+  [:realtimekit :sfu :mesh])
 
-  RealtimeKit wins when both are configured. They are alternatives rather than
-  layers — RealtimeKit is built on the SFU, so running kaigi against both at
-  once would mean two systems allocating tracks for the same participants — and
-  a deployment that somehow carried both should behave predictably rather than
-  by accident of check order.
+(defn configured-planes
+  "The planes this deployment holds credentials for.
+
+  `:mesh` is unconditional: it needs no external service, which is what makes
+  it the floor every other decision here can fall back to.
 
   `kaigi.sfu` is retained even though RealtimeKit is the chosen path: the
   binding is written and tested, the SFU remains the lower-level option, and
   deleting it would mean rediscovering the wire format the next time someone
   wants raw track control."
   [config]
-  (cond
-    (rk/configured? config) :realtimekit
-    (sfu/configured? config) :sfu
-    :else :mesh))
+  (cond-> #{:mesh}
+    (sfu/configured? config) (conj :sfu)
+    (rk/configured? config)  (conj :realtimekit)))
+
+(defn transport
+  "Which media plane carries this meeting: `:realtimekit`, `:sfu` or `:mesh`.
+
+  `client-planes` is the set of planes the connected clients can actually
+  drive; `nil` means \"unconstrained\", which is what a caller that only knows
+  the configuration passes. See the namespace docstring for why the client
+  gets a vote at all.
+
+  Falls back to `:mesh` when the intersection is empty. Mesh is the plane the
+  original protocol always spoke, so it is the safest thing to be wrong
+  about — and being wrong here is visible (a client that cannot drive mesh
+  connects to nobody and says so) rather than silent (a client that no-ops on
+  an unknown plane looks perfectly healthy)."
+  ([config] (transport config nil))
+  ([config client-planes]
+   (let [available (configured-planes config)
+         drivable  (if (nil? client-planes)
+                     available
+                     (set/intersection available (set client-planes)))]
+     (or (first (filter drivable planes)) :mesh))))
+
+(defn negotiate
+  "The plane a room should run on given what each connected client declared.
+
+  `client-plane-sets` is one set per client that has said `hello`; clients
+  that have not declared anything are simply absent from the seq rather than
+  contributing an empty set, because an empty set would intersect everything
+  down to nothing and drop a whole room to mesh on the strength of one socket
+  that had not finished connecting.
+
+  The intersection is over the *room*, not per participant: mesh needs both
+  ends to agree before either can offer, so a plane held by only some of the
+  room is not a plane the room can use."
+  [config client-plane-sets]
+  (let [declared (remove nil? client-plane-sets)]
+    (transport config
+               (when (seq declared)
+                 (reduce set/intersection (map set declared))))))
 
 (defn mesh-viable?
   "True when the meeting is small enough for a full mesh."
@@ -195,21 +265,30 @@
   `:kaigi.plan/warning` when the meeting has outgrown the ceiling. The
   warning is data rather than a log line so the UI can show it; a limit the
   operator only learns about from server logs is a limit the participants
-  experience as 'the app is broken'."
-  [mtg sessions viewer-id subscribed config]
-  (case (transport config)
-    ;; RealtimeKit's SDK owns track subscription entirely: the client joins
-    ;; with a token and the service decides what it receives. There is no plan
-    ;; to compute — emitting an empty one would suggest kaigi had an opinion it
-    ;; does not have.
-    :realtimekit {:kaigi.plan/transport :realtimekit}
+  experience as 'the app is broken'.
 
-    :sfu (assoc (sfu-plan mtg sessions viewer-id subscribed)
-                :kaigi.plan/transport :sfu)
-    :mesh (cond-> {:kaigi.plan/transport :mesh
-                   :kaigi.plan/peers (mesh-plan mtg viewer-id)}
-            (not (mesh-viable? mtg))
-            (assoc :kaigi.plan/warning
-                   {:kaigi.plan/code :mesh/over-ceiling
-                    :kaigi.plan/ceiling mesh-participant-ceiling
-                    :kaigi.plan/count (count (room/participant-ids (:kaigi/room mtg)))}))))
+  The six-argument form takes the plane as an argument instead of deriving it
+  from `config`. A room that has negotiated a plane across its clients must
+  build every participant's plan on *that* plane — if this re-derived it from
+  configuration alone, the room would announce one transport in `:state` and
+  hand out plans for another, which is the disagreement the negotiation
+  exists to remove."
+  ([mtg sessions viewer-id subscribed config]
+   (plan-for mtg sessions viewer-id subscribed config (transport config)))
+  ([mtg sessions viewer-id subscribed _config chosen]
+   (case chosen
+     ;; RealtimeKit's SDK owns track subscription entirely: the client joins
+     ;; with a token and the service decides what it receives. There is no plan
+     ;; to compute — emitting an empty one would suggest kaigi had an opinion it
+     ;; does not have.
+     :realtimekit {:kaigi.plan/transport :realtimekit}
+
+     :sfu (assoc (sfu-plan mtg sessions viewer-id subscribed)
+                 :kaigi.plan/transport :sfu)
+     :mesh (cond-> {:kaigi.plan/transport :mesh
+                    :kaigi.plan/peers (mesh-plan mtg viewer-id)}
+             (not (mesh-viable? mtg))
+             (assoc :kaigi.plan/warning
+                    {:kaigi.plan/code :mesh/over-ceiling
+                     :kaigi.plan/ceiling mesh-participant-ceiling
+                     :kaigi.plan/count (count (room/participant-ids (:kaigi/room mtg)))})))))

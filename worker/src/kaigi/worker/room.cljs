@@ -77,13 +77,34 @@
 ;; socket helpers
 ;; ---------------------------------------------------------------------------
 
-(defn- attach-id! [ws id]
-  (.serializeAttachment ws (encode {:kaigi/participant-id id})))
+(defn- attach!
+  "Bind the identity and the declared media capability to the socket itself.
+
+  Both go in the serialized attachment rather than an in-memory map for the
+  same reason: hibernation. The isolate can be evicted between two frames, and
+  anything held in a module-level map is gone when it wakes while the socket
+  is not — a woken room would then know who is connected but not what any of
+  them can drive, and would have to guess."
+  [ws id planes]
+  (.serializeAttachment ws (encode {:kaigi/participant-id id
+                                    :kaigi/transports planes})))
 
 (defn- id-of
   "The participant id bound to `ws`, or nil before `hello`."
   [ws]
   (some-> (.deserializeAttachment ws) decode :kaigi/participant-id))
+
+(defn- planes-of
+  "The media planes the client on `ws` said it can drive, or nil if it did not
+  say.
+
+  Nil and `#{}` are deliberately different: nil is a client from before this
+  negotiation existed (or one that has not said hello yet) and means \"no
+  opinion\", while an explicit empty set would mean \"I can drive nothing\" and
+  would collapse the whole room's intersection. `kaigi.plan/negotiate` drops
+  the nils rather than treating them as empty."
+  [ws]
+  (some-> (.deserializeAttachment ws) decode :kaigi/transports))
 
 (defn- send!
   [ws msg]
@@ -207,16 +228,21 @@
   plan to another is how you end up with two peers both trying to be the
   offerer."
   [ctx env mtg sessions]
-  (let [cfg (config-of env)]
+  (let [cfg (config-of env)
+        ;; One plane for the whole room, negotiated across every connected
+        ;; client, and then used for BOTH the announcement and every plan.
+        ;; Deriving it twice is how a room comes to tell a participant it is
+        ;; on RealtimeKit while handing them a mesh plan.
+        chosen (plan/negotiate cfg (map planes-of (sockets ctx)))]
     (doseq [ws (sockets ctx)]
       (let [id (id-of ws)]
         (send! ws {:t :state
                    :kaigi/meeting mtg
                    :kaigi/you id
-                   :kaigi/transport (plan/transport cfg)
+                   :kaigi/transport chosen
                    :kaigi/ice-servers (ice-servers env (or id ""))})
         (when (and id (m/admitted? mtg id) (m/in-room? mtg id))
-          (let [p (plan/plan-for mtg sessions id {} cfg)]
+          (let [p (plan/plan-for mtg sessions id {} cfg chosen)]
             (if (= :realtimekit (:kaigi.plan/transport p))
               ;; The plan for RealtimeKit is a token, not a topology: the SDK
               ;; owns subscription. Minting is per participant and happens here
@@ -229,9 +255,27 @@
                                        refused (assoc :kaigi/rk-refused refused))))))
               (send! ws {:t :plan :kaigi/plan p}))))))))
 
+(defn- declared-planes
+  "The media planes named in a `hello`, keeping only ones kaigi actually has.
+
+  Frames arrive as EDN read off an untrusted socket, so this is filtered
+  rather than trusted: without it a client could name a plane that does not
+  exist and the room's intersection would quietly empty out, dropping
+  everyone to mesh — or, if a future plane were added, name one the
+  deployment holds no credentials for.
+
+  Returns nil when the frame declares nothing, which `planes-of` documents as
+  distinct from an empty set."
+  [declared]
+  (when (coll? declared)
+    (let [known (set (filter (set plan/planes) declared))]
+      (when (seq known) known))))
+
 (defn- handle-hello
-  "First frame on a socket: bind an identity and knock."
-  [state ctx env ws {:keys [kaigi/participant-id kaigi/name kaigi/did]}]
+  "First frame on a socket: bind an identity, declare what the client can
+  drive, and knock."
+  [state ctx env ws {:keys [kaigi/participant-id kaigi/name kaigi/did
+                            kaigi/transports]}]
   (if-not (valid-id? participant-id)
     (do (send! ws {:t :error :kaigi/code :bad-id
                    :kaigi/message "participant id must match [A-Za-z0-9_.:-]{1,128}"})
@@ -241,7 +285,7 @@
                    (m/request-admission (m/participant participant-id
                                                        {:name name :did did}))
                    (m/join participant-id))]
-      (attach-id! ws participant-id)
+      (attach! ws participant-id (declared-planes transports))
       (persist! ctx mtg')
       (broadcast-state! ctx env mtg' (:sessions state))
       (assoc state :meeting mtg'))))

@@ -18,15 +18,32 @@ persists it, and moves the bytes.
 
 | Layer | State | Evidence |
 |---|---|---|
-| `kaigi.model` / `validate` / `plan` / `sfu` / `signal` | **implemented** | 52 tests / 184 assertions green on **both** JVM and nbb |
-| DO signaling room (`kaigi.worker.*`) | **implemented, deployed** | 22/22 end-to-end checks against the live Worker, 4 consecutive clean runs |
-| Cloudflare **RealtimeKit** path | **binding + gate implemented, not exercised** | needs a Cloudflare API token and a preset — see below |
+| `kaigi.model` / `validate` / `plan` / `invite` / `sfu` / `signal` | **implemented** | 97 tests / 336 assertions green on **both** JVM and nbb |
+| DO signaling room (`kaigi.worker.*`) | **implemented, deployed** | 22/22 end-to-end checks against a real Worker |
+| Invitation flow (landing → code → link → pre-join) | **implemented** | 9/9 browser checks: `e2e-invite.cljs` |
+| Cloudflare **RealtimeKit** path | **wired end to end** | `e2e-realtimekit.cljs`; see "Two media planes" |
 | Cloudflare Realtime **SFU** path | **implemented, retained, not the chosen path** | kept deliberately; see "Two media planes" |
 | Browser console (`kaigi.ui` + `kaigi.app`) | **implemented, deployed** | rendered page scores **100.00 / 0 findings** on the deterministic HIG/WCAG audit |
-| Real call (mesh) | **works** | two headless Chromium instances, ICE connected, **~190 KB of inbound RTP measured on each side**, 3 consecutive clean production runs |
+| Real call (mesh) | **works** | two headless Chromium instances, ICE connected, **~190 KB of inbound RTP measured on each side** |
 
-So: **a real two-party call works in production over mesh.** The SFU path is
-written and untested against the live service; see "What is missing" below.
+So: **you can send someone a link and be in a call with them.** That is the
+claim `e2e-invite.cljs` exists to hold to, because every other harness here
+addresses a meeting whose id it invented and none of them would notice if
+there were no way for a person to get one.
+
+### The outage this document previously did not mention
+
+Between the RealtimeKit secrets landing on the live Worker and 2026-08-01, the
+deployment **carried no media at all**. `plan/transport` read `:realtimekit`
+because the secrets were present; the browser bundle could only drive the mesh
+and no-opped on every other plane. The result had a complete roster, working
+controls and mute propagating between tabs — and zero PeerConnections, zero
+RTP, and nothing in any log naming the cause.
+
+Two things came out of it, and both are in the code rather than in this
+paragraph: clients now **declare which planes they can drive** and the room
+negotiates across them (`kaigi.plan/negotiate`), and `e2e.cljs` now asserts
+that a mesh-only client gets mesh from a RealtimeKit-configured room.
 
 ## What it composes rather than reimplements
 
@@ -77,6 +94,59 @@ participants are sharing and the grid has to guess.
 unmute. Opening a live microphone in someone else's room is not a moderation
 action.
 
+## Getting in
+
+A meeting is a link and nothing else. `kaigi.invite` owns the two decisions
+that makes possible, as pure functions with no I/O:
+
+```clojure
+(invite/meeting-code (range 10))            ;; => "abc-defg-hij"
+(invite/normalize-code "ABC DEFG HIJ")      ;; => "abc-defg-hij"
+(invite/join-url "https://kaigi.example" "abc-defg-hij")
+;; => "https://kaigi.example/?meeting=abc-defg-hij"
+```
+
+**Ten lowercase letters, grouped 3-4-3.** A code gets read aloud on a phone
+call and typed by someone not looking at it, so it is grouped; and it carries
+no digits, because the pairs a listener confuses (`0`/`O`, `1`/`l`) are exactly
+the ones a spoken code produces. 26^10 ≈ 1.4e14, so guessing one is not a way
+in — which is the same bargain Meet makes, and why `:approval-required` still
+exists for meetings that want a door as well as a key.
+
+**The randomness is an argument.** `meeting-code` takes the numbers rather
+than calling `rand-int`, so the browser can hand it `crypto.getRandomValues`
+and the function stays testable. A short read returns nil instead of padding,
+because a code with a predictable tail is worse than no code.
+
+Three screens, one swap target (`#kaigi-console`, dispatched by `:view`):
+
+- **landing** — what a bare URL shows. It used to join a meeting literally
+  called `lobby`, so every visitor with no query string landed in one shared
+  room together.
+- **pre-join** — camera preview and a name field, remembered in
+  `localStorage`. Nothing ever asked for a name before, so the client sent the
+  random per-tab id as the display name and rosters read `u-a1b2c3`.
+- **meeting** — the console, with the invitation and a copy button in it,
+  because the moment you notice someone is missing is a moment you are already
+  in the call.
+
+Two details that are load-bearing:
+
+**`render!` folds the text fields back into state before it swaps.** The
+console subtree is replaced wholesale, so anything typed and not yet folded in
+is destroyed by the next render — and the join screen ships in the SSR'd
+document, so the name field is typeable *before the bundle boots*. Measured
+2026-08-01: the invitation harness typed a name, `init` rendered a moment
+later, and the participant joined under the random id the name was supposed to
+replace.
+
+**`join!` awaits `capture!` before opening the socket.** The join button is
+also on screen from the first paint, so it gets pressed before `getUserMedia`
+resolves. Connecting then produces an offer with no tracks in it: zero
+m-lines, ICE never runs, and both tabs sit at one PeerConnection each with
+nothing flowing — which is exactly what the media harness reported while this
+screen was being built.
+
 ## Media topology
 
 `kaigi.plan` decides who subscribes to whom, and returns *diffs* — re-pulling
@@ -107,8 +177,32 @@ operator only learns from server logs is a limit participants experience as
 ## Two media planes, and why both are here
 
 `kaigi.plan/transport` returns `:realtimekit`, `:sfu` or `:mesh` — decided by
-configuration, never by headcount, so a deployment behaves the same on every
-join instead of switching topology mid-meeting.
+configuration **and by what the connected clients say they can drive**, never
+by headcount, so a deployment behaves the same on every join instead of
+switching topology mid-meeting.
+
+### The client gets a vote
+
+Configuration alone decided this once. A client declares its planes in
+`hello`; `kaigi.plan/negotiate` intersects those declarations with what the
+deployment holds credentials for and takes the best survivor, falling back to
+mesh. `nil` from a client that has not declared anything means "no opinion"
+and is dropped from the intersection rather than emptying it — otherwise one
+socket mid-connect would drop a whole room to mesh.
+
+The intersection is over the **room**, not per participant: mesh needs both
+ends to agree before either can offer, so a plane held by only some of the
+room is not a plane the room can use. One client with a stale bundle therefore
+moves everyone — which is a different thing from switching on headcount.
+Headcount changes constantly and predicts nothing; a participant who literally
+cannot drive the current plane is a meeting that is about to be silent for
+them.
+
+`?transport=mesh` narrows what a single tab declares. It is a field diagnostic
+("does this work without RealtimeKit?") and the seam that lets
+`e2e-media.cljs` prove the mesh still carries RTP on a Worker configured for
+RealtimeKit. Narrowing only — a tab cannot claim a plane the bundle has no
+code for.
 
 **RealtimeKit is the chosen path** (owner decision, 2026-07-31). It is a
 different product from the SFU with a different API and different credentials,
@@ -126,6 +220,24 @@ all-zeros UUID does.
 tested against the published OpenAPI, the SFU stays the lower-level option for
 raw track control, and removing it would mean rediscovering the wire format the
 next time anyone wants it.
+
+### The SDK is vendored, not compiled
+
+`kaigi.app` loads `@cloudflare/realtimekit` with a `<script>` tag from
+`/js/realtimekit.js`, put there by `vendor-realtimekit.cljs`. Not a
+`:require`, and not a preference: the package's CommonJS entry contains
+`super()` inside an arrow function, which the Closure compiler refuses
+outright — measured 2026-08-01, `shadow-cljs release app` fails with
+`closure-compiler does not allow calls to super() in arrow functions` at
+`dist/index.cjs.js:8`. The package also ships `dist/browser.js`, a prebuilt
+IIFE assigning the client to a global, which needs no bundler at all.
+
+It is the better arrangement anyway. A 650 KB third-party blob is not source
+this repo compiles, the version stays pinned by `package.json`, and a
+deployment running on the mesh never downloads a client it will not use. The
+vendor step asserts the global is still called `RealtimeKitClient` rather than
+copying blindly — a rename would otherwise ship a file that loads cleanly and
+defines nothing.
 
 ### RealtimeKit does not replace `kaigi.model`
 
@@ -228,6 +340,7 @@ nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-test
 # worker
 cd worker
 npm install
+nbb vendor-realtimekit.cljs                 # SDK -> public/js/, see "vendored, not compiled"
 node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release worker
 nbb verify-bundle.cljs                      # actually import()s the artifact
 npx wrangler dev --port 8799 --local &
@@ -241,10 +354,18 @@ nbb --classpath "../src:../../webrtc/src:../../org-w3-webrtc-signaling/src:\
 node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release app
 
 # a real call: two headless Chromium instances with fake devices, asserting
-# inbound RTP bytes > 0 on both sides
+# inbound RTP bytes > 0 on both sides. Pins ?transport=mesh, so it proves the
+# mesh still carries media on a Worker configured for RealtimeKit.
 nbb e2e-media.cljs http://127.0.0.1:8799
 
+# the product claim: a link is the whole of joining
+nbb e2e-invite.cljs http://127.0.0.1:8799
+
 npx wrangler deploy
+
+# the RealtimeKit plane needs the real service — there is no local equivalent,
+# because the plane IS the service. Run against the deployment.
+nbb e2e-realtimekit.cljs https://kaigi.<subdomain>.workers.dev
 ```
 
 `release`, never `compile`: a `compile` build exits 0, emits every expected
@@ -293,14 +414,13 @@ recorded here rather than worked around:
 
 ## What is missing, precisely
 
-1. **The RealtimeKit path is not wired past the binding.** `kaigi.realtimekit`
-   shapes the calls and `token-refusal` gates them, both tested — but the room
-   does not yet create a RealtimeKit meeting or mint tokens, and the browser
-   does not yet load the RealtimeKit SDK. Two owner actions unblock it:
-   a Cloudflare **API token** with RealtimeKit permissions
-   (`REALTIMEKIT_API_TOKEN`) and a **preset name** configured in the dashboard
-   (`REALTIMEKIT_PRESET`); the app id (`REALTIMEKIT_APP_ID`) and account id
-   already exist.
+1. **~~The RealtimeKit path is not wired past the binding.~~ Wired.** The room
+   creates the RealtimeKit meeting, mints a token per admitted participant and
+   sends it with the plan; the browser loads the vendored SDK, joins with that
+   token, and re-parents the tracks it hands back into the tiles the roster
+   already rendered. `e2e-realtimekit.cljs` is the gate. What remains is
+   **screen share on this plane** — `start-share` still moves the model value
+   and the mesh path, and nothing calls the SDK's screen-share API.
 2. **The SFU path is untested against the real service.** No Cloudflare
    Realtime app exists for this account — the wrangler OAuth session carries no
    `calls`/`realtime` scope, and minting an app token needs the dashboard.

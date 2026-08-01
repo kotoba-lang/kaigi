@@ -36,9 +36,13 @@
 (def checks (atom 0))
 
 (defn check!
-  [label pass?]
+  "`detail` is printed only on failure, and only when given — the same shape
+  `e2e-media.cljs` uses. A failing check that names nothing but its own label
+  makes the reader re-derive what the room actually answered."
+  [label pass? & [detail]]
   (swap! checks inc)
   (println (if pass? "ok  :" "FAIL:") label)
+  (when (and (not pass?) detail) (println "        " detail))
   (when-not pass? (swap! failures inc)))
 
 (defn- connect
@@ -115,7 +119,20 @@
   []
   [;; --- first participant ------------------------------------------------
    #(open! a)
-   #(do (send! a {:t :hello :kaigi/participant-id "jun" :kaigi/name "Jun"})
+   ;; Declares `#{:mesh}`, and that is load-bearing rather than incidental.
+   ;;
+   ;; Everything below asserts mesh vocabulary — `:kaigi.plan/peers`, offerer
+   ;; and answerer roles. A Worker configured for RealtimeKit answers a client
+   ;; with no declared plane by putting the room on RealtimeKit, where there
+   ;; are no peers to name and no offer direction to hold, and this file would
+   ;; report three failures against a room behaving exactly as designed.
+   ;;
+   ;; Declaring the plane is also what exercises the negotiation over the real
+   ;; wire: the check below asserts the room came back with mesh, which on a
+   ;; RealtimeKit-configured deployment is only true if the declaration was
+   ;; read, sanitized and intersected.
+   #(do (send! a {:t :hello :kaigi/participant-id "jun" :kaigi/name "Jun"
+                  :kaigi/transports #{:mesh}})
         (wait-for (fn [] (some? (last-state a)))))
    #(let [st (last-state a) mtg (:kaigi/meeting st)]
       (check! "first participant receives a state frame" (some? st))
@@ -123,7 +140,11 @@
       (check! "host is admitted"
               (= :admitted (get-in mtg [:kaigi/participants "jun"
                                         :kaigi.participant/admission])))
-      (check! "transport is reported" (contains? #{:mesh :sfu} (:kaigi/transport st)))
+      (check! "the room honours the plane the client said it can drive"
+              (= :mesh (:kaigi/transport st))
+              (str "got " (pr-str (:kaigi/transport st))
+                   " — a room that answers a mesh-only client with another"
+                   " plane is the 2026-08-01 outage"))
       (check! "ice servers are reported as data" (vector? (:kaigi/ice-servers st)))
       (check! "EDN survived the wire — role is a keyword, not a string"
               (keyword? (get-in mtg [:kaigi/participants "jun" :kaigi.participant/role])))
@@ -131,7 +152,8 @@
 
    ;; --- second participant ----------------------------------------------
    #(open! b)
-   #(do (send! b {:t :hello :kaigi/participant-id "rin" :kaigi/name "Rin"})
+   #(do (send! b {:t :hello :kaigi/participant-id "rin" :kaigi/name "Rin"
+                  :kaigi/transports #{:mesh}})
         ;; wait until BOTH sides have seen the two-person roster, not a clock
         (wait-for (fn [] (and (contains? (:kaigi/participants (meeting-of b)) "jun")
                               (contains? (:kaigi/participants (meeting-of b)) "rin")

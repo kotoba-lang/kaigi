@@ -152,3 +152,50 @@
       (is (= :realtimekit (:kaigi.plan/transport p)))
       (is (not (contains? p :kaigi.plan/pull)))
       (is (not (contains? p :kaigi.plan/peers))))))
+
+;; ---------------------------------------------------------------------------
+;; capability negotiation
+;;
+;; These cover the production failure of 2026-08-01 directly: RealtimeKit
+;; secrets on a Worker whose bundle could only drive the mesh, which reported
+;; `:realtimekit`, handed out plans nothing acted on, and carried zero RTP.
+;; ---------------------------------------------------------------------------
+
+(def rk-cfg {:account-id "a" :app-id "b" :api-token "c" :preset "p"})
+
+(deftest a-plane-no-client-can-drive-is-not-chosen
+  (testing "configured for RealtimeKit, but every client speaks only mesh"
+    (is (= :mesh (plan/transport rk-cfg #{:mesh})))
+    (is (= :mesh (plan/negotiate rk-cfg [#{:mesh} #{:mesh}]))))
+  (testing "and it IS chosen once the clients can drive it"
+    (is (= :realtimekit (plan/negotiate rk-cfg [#{:realtimekit :mesh}
+                                                #{:realtimekit :mesh}])))))
+
+(deftest one-stale-client-moves-the-whole-room
+  (testing "mesh needs both ends to agree, so the room takes the intersection"
+    (is (= :mesh (plan/negotiate rk-cfg [#{:realtimekit :mesh} #{:mesh}])))))
+
+(deftest a-client-that-has-not-declared-yet-does-not-empty-the-intersection
+  (testing "nil is 'no opinion' — a socket mid-connect must not drop the room"
+    (is (= :realtimekit (plan/negotiate rk-cfg [#{:realtimekit :mesh} nil])))
+    (is (= :realtimekit (plan/negotiate rk-cfg [nil nil])))
+    (is (= :realtimekit (plan/negotiate rk-cfg [])))))
+
+(deftest a-client-cannot-conjure-a-plane-the-deployment-lacks
+  (testing "declaring RealtimeKit against an unconfigured Worker stays mesh"
+    (is (= :mesh (plan/transport {} #{:realtimekit :mesh})))
+    (is (= :mesh (plan/negotiate {} [#{:realtimekit}])))))
+
+(deftest an-empty-intersection-falls-back-to-mesh-rather-than-nil
+  (testing "a plane of nil is a client that no-ops — the failure being fixed"
+    (is (= :mesh (plan/transport rk-cfg #{})))
+    (is (= :mesh (plan/negotiate {:app-id "a" :app-token "t"} [#{:realtimekit}])))))
+
+(deftest the-announced-plane-and-the-plan-cannot-disagree
+  (testing "a room that negotiated mesh must hand out mesh plans, not RK ones"
+    (let [chosen (plan/negotiate rk-cfg [#{:mesh}])
+          p (plan/plan-for (three-way) sessions "jun" {} rk-cfg chosen)]
+      (is (= :mesh chosen))
+      (is (= :mesh (:kaigi.plan/transport p)))
+      (is (seq (:kaigi.plan/peers p))
+          "the whole point: there is something for the client to act on"))))

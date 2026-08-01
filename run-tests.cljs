@@ -22,6 +22,7 @@
 
 (ns run-tests
   (:require [cljs.test :as t]
+            [kaigi.invite-test]
             [kaigi.model-test]
             [kaigi.plan-test]
             [kaigi.sfu-test]
@@ -36,7 +37,8 @@
   (when-not (t/successful? m)
     (set! (.-exitCode js/process) 1)))
 
-(t/run-tests 'kaigi.model-test
+(t/run-tests 'kaigi.invite-test
+             'kaigi.model-test
              'kaigi.plan-test
              'kaigi.sfu-test
              'kaigi.signal-test
