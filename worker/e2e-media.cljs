@@ -84,8 +84,37 @@
                     (fn [r] (when (>= (.status r) 400)
                               (println "  [" who (.status r) "]" (.url r)))))
                (-> (.goto page (str base "/?meeting=" meeting "&me=" who
+                                    ;; Pin the mesh explicitly.
+                                    ;;
+                                    ;; Everything this file asserts —
+                                    ;; PeerConnection count, ICE state,
+                                    ;; inbound-rtp bytes — is mesh vocabulary.
+                                    ;; On a Worker configured for RealtimeKit
+                                    ;; the SDK owns transport and holds no
+                                    ;; RTCPeerConnection this harness can see,
+                                    ;; so without this the run would report
+                                    ;; zero peers and zero RTP against a call
+                                    ;; that was working fine.
+                                    ;;
+                                    ;; It is also the regression test for the
+                                    ;; 2026-08-01 outage: it proves the mesh
+                                    ;; still carries media on a deployment
+                                    ;; whose secrets say RealtimeKit, which is
+                                    ;; precisely the combination that carried
+                                    ;; none.
+                                    "&transport=mesh"
                                     (when relay-only? "&ice=relay"))
                           #js {:waitUntil "load"})
+                   ;; Past the pre-join screen. The console no longer joins on
+                   ;; load — a person names themselves and presses 参加 — so
+                   ;; the harness has to do the same thing a person does.
+                   ;; Filling the name field is not incidental: it is what
+                   ;; makes the roster assert on a real display name instead
+                   ;; of a random per-tab id.
+                   (.then (fn [_] (.waitForSelector page "[data-act=\"join\"]"
+                                                    #js {:timeout 20000})))
+                   (.then (fn [_] (.fill page "#kaigi-name" who)))
+                   (.then (fn [_] (.click page "[data-act=\"join\"]")))
                    (.then (fn [_] page)))))))
 
 (defn- wait-for-fn

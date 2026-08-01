@@ -3,7 +3,12 @@
 node_modules/
 worker/.shadow-cljs/
 worker/.wrangler/
-worker/node_modules/
+# No trailing slash: in a `git worktree` this path is usually a SYMLINK to the
+# shared checkout's install rather than a directory, and a pattern ending in
+# `/` matches only directories — so `worker/node_modules/` left a symlink to
+# 140 packages sitting in `git status` as an untracked file, one `git add -A`
+# away from being committed.
+worker/node_modules
 worker/dist/
 
 # Generated deploy artifacts, NOT committed.
@@ -16,3 +21,6 @@ worker/dist/
 # in README.md under "Build and test".
 worker/public/index.html
 worker/public/js/
+
+# Local secrets for `wrangler dev`. Never committed.
+worker/.dev.vars

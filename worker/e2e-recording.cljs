@@ -47,8 +47,18 @@
                (.on page "console"
                     (fn [m] (when (#{"error" "warning"} (.type m))
                               (println "  [" who (.type m) "]" (.text m)))))
-               (-> (.goto page (str base "/?meeting=" meeting "&me=" who)
+               ;; `transport=mesh` for the same reason as e2e-media: recording
+               ;; captures the LOCAL stream, which exists on every plane, but
+               ;; pinning the transport keeps this run independent of whichever
+               ;; secrets the target deployment happens to carry.
+               (-> (.goto page (str base "/?meeting=" meeting "&me=" who "&transport=mesh")
                           #js {:waitUntil "load"})
+                   ;; The console waits on the pre-join screen now, so the
+                   ;; harness names itself and presses 参加 like a person does.
+                   (.then (fn [_] (.waitForSelector page "[data-act=\"join\"]"
+                                                    #js {:timeout 20000})))
+                   (.then (fn [_] (.fill page "#kaigi-name" who)))
+                   (.then (fn [_] (.click page "[data-act=\"join\"]")))
                    (.then (fn [_] page)))))))
 
 (defn- wait-for
