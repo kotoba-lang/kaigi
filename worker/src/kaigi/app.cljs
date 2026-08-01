@@ -537,7 +537,13 @@
                           ;; join after it.
                           (doseq [p (array-seq (.toArray joined))]
                             (rk-wire-participant! p))))
-                   (.joinRoom meeting))))
+                   ;; `join`, not `joinRoom`. Both names exist in the SDK's
+                   ;; type definitions — `joinRoom` on the internal socket and
+                   ;; room classes, `join` on the `Client` that `init` returns
+                   ;; — so the wrong one type-checks in the reader's head and
+                   ;; fails at runtime with `b.joinRoom is not a function`,
+                   ;; which is what it did against production on 2026-08-01.
+                   (.join meeting))))
         (.catch (fn [e]
                   ;; Cleared, so a later plan frame can try again: a token that
                   ;; expired while this tab sat on the pre-join screen must not

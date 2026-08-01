@@ -150,24 +150,61 @@
         (.then (fn [res] (.json res)))
         (.then (fn [body] (rk/parse-response (js->clj body :keywordize-keys true)))))))
 
+(declare current-state put-state! room-key)
+
+;; In-flight `create-meeting` calls, keyed by room. (A `defonce` takes no
+;; docstring, which is why this is a comment — same shape as `room-states`.)
+;;
+;; Separate from `room-states` on purpose, and both halves of that matter.
+;;
+;; It holds a PROMISE, not an id, because the id does not exist yet while the
+;; call is in the air — and that gap is exactly where two participants arrive.
+;; A Durable Object is single-threaded but not single-*task*: the two `hello`
+;; frames of a two-person meeting land microseconds apart, both find
+;; `:rk-meeting-id` still nil, and both POST a create. Measured against
+;; production 2026-08-01 — both tabs joined RealtimeKit successfully and each
+;; saw zero other participants, because they had been put in two different
+;; RealtimeKit meetings.
+;;
+;; And it is a separate atom because `room-states` is rewritten wholesale:
+;; `handle-frame` takes a state snapshot and its return value is `put-state!`d
+;; after `broadcast-state!` has already run, so anything stored there
+;; synchronously would be overwritten by a value read before it existed.
+(defonce ^:private rk-creating (atom {}))
+
 (defn- ensure-rk-meeting!
-  "The RealtimeKit meeting id for this room, created on first need.
+  "The RealtimeKit meeting id for this room, created on first need — and
+  created exactly once.
 
   Created lazily rather than when the room wakes: a room nobody joins should
-  not allocate anything, and the id is durable state so it survives
-  hibernation and is created exactly once."
+  not allocate anything. The resolved id is durable state, so it survives
+  hibernation; the in-flight promise is not, because a room that is evicted
+  mid-create has nothing to resume."
   [ctx cfg mtg]
-  (let [existing (-> (current-state ctx) :rk-meeting-id)]
-    (if existing
-      (js/Promise.resolve existing)
-      (-> (rk-fetch! cfg (rk/create-meeting-request cfg {:title (:kaigi/title mtg)}))
-          (.then (fn [parsed]
-                   (if-let [id (rk/meeting-id parsed)]
-                     (do (put-state! ctx (assoc (current-state ctx) :rk-meeting-id id))
-                         (.put (.-storage ctx) "rk-meeting-id" id)
-                         id)
-                     (throw (ex-info "RealtimeKit meeting creation failed"
-                                     {:errors (:kaigi.rk/errors parsed)})))))))))
+  (let [k (room-key ctx)]
+    (cond
+      (get @rk-creating k) (get @rk-creating k)
+
+      (:rk-meeting-id (current-state ctx))
+      (js/Promise.resolve (:rk-meeting-id (current-state ctx)))
+
+      :else
+      (let [p (-> (rk-fetch! cfg (rk/create-meeting-request cfg {:title (:kaigi/title mtg)}))
+                  (.then (fn [parsed]
+                           (if-let [id (rk/meeting-id parsed)]
+                             (do (put-state! ctx (assoc (current-state ctx) :rk-meeting-id id))
+                                 (.put (.-storage ctx) "rk-meeting-id" id)
+                                 (swap! rk-creating dissoc k)
+                                 id)
+                             (do (swap! rk-creating dissoc k)
+                                 (throw (ex-info "RealtimeKit meeting creation failed"
+                                                 {:errors (:kaigi.rk/errors parsed)}))))))
+                  ;; Cleared on failure too, or one transient error from the
+                  ;; Cloudflare API would leave every later join in this room
+                  ;; awaiting a promise that will never resolve.
+                  (.catch (fn [e] (swap! rk-creating dissoc k) (throw e))))]
+        (swap! rk-creating assoc k p)
+        p))))
 
 (defn- rk-token!
   "Mint a client token for `participant-id`, or nil when the model refuses.
