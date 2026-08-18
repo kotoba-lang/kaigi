@@ -21,6 +21,11 @@
                 "../../org-ietf-turn/src"
                 "../../bytes/src"
                 ;; design system, for the browser console's views
+                ;; kotoba-ui composes byoubu; without these two the build stops
+                ;; at `The required namespace "byoubu-ui.core" is not available`
+                ;; before any code runs (restored 2026-08-18)
+                "../../byoubu/src"
+                "../../byoubu-ui/src"
                 "../../kotoba-ui/src"
                 "../../liquid-glass-ui/src"
                 "../../shitsuke/src"
