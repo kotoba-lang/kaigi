@@ -25,7 +25,7 @@
   could be mistaken for a recording nobody agreed to. This is `gijiroku`'s
   charter G4 (raw audio/video never enters the store) and G3 (consent is a
   ground fact, never inferred) applied at the producing end."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kaigi.model :as m]))
 
 (def container

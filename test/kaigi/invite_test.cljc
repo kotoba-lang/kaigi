@@ -1,5 +1,5 @@
 (ns kaigi.invite-test
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [clojure.test :refer [deftest is testing]]
             [kaigi.invite :as invite]))
 

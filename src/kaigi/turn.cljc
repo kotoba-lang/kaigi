@@ -29,7 +29,7 @@
   a value rather than logging.
 
   Pure: `now` and the secret are supplied by the caller. No clock, no I/O."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kotoba.turn.credential :as cred]))
 
 (def default-stun

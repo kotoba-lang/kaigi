@@ -39,7 +39,7 @@
   `PUT  /apps/{appId}/sessions/{sessionId}/renegotiate`,
   `PUT  /apps/{appId}/sessions/{sessionId}/tracks/close` and
   `GET  /apps/{appId}/sessions/{sessionId}`."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def base-url
   "The SFU API root, including the version segment."

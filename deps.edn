@@ -4,7 +4,12 @@
  ;; relay routing from `org-w3-webrtc-signaling` (kotoba.rt.core). Both are
  ;; pure .cljc with no transport, which is why they compose here without
  ;; dragging a runtime in.
- :deps {io.github.kotoba-lang/webrtc
+ :deps {
+        ;; kotoba.lang.text, not clojure.string. Pinned as an explicit floor:
+        ;; tools.deps takes the NEWEST sha it is shown, so without a floor here
+        ;; this repo silently rides whatever a sibling happens to name.
+        io.github.kotoba-lang/text {:git/sha "73bdb13ae7a3d004b44bca08be03a3191157a38f"}
+       io.github.kotoba-lang/webrtc
         {:git/url "https://github.com/kotoba-lang/webrtc.git"
                                      :git/sha "55dfd79dbaf0199472815fc018f705e13d6a5452"}
         io.github.kotoba-lang/org-w3-webrtc-signaling
