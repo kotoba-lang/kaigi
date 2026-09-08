@@ -30,7 +30,7 @@
 
   Portable `.cljc`: no clock, no I/O. Ids and tokens are supplied by the
   caller."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kaigi.model :as m]))
 
 (def base-url

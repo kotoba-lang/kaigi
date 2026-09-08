@@ -29,7 +29,7 @@
   expressed as `data-act` values that `kaigi.app` dispatches on, so no
   handlers are baked into the hiccup and the SSR and browser output are
   identical for identical data."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kaigi.invite :as invite]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
@@ -44,7 +44,7 @@
     (->> (take 2 parts)
          (map #(subs % 0 (min 1 (count %))))
          (apply str)
-         str/upper-case)))
+         str/upper)))
 
 (defn- display-name
   [p]

@@ -32,7 +32,7 @@
   `crypto.getRandomValues`, which is what a code that nobody should be able to
   guess actually requires. A `rand-int` here would have been unguessable
   right up until someone needed to test it."
-  (:require [clojure.string :as str]))
+  (:require [kotoba.lang.text :as str]))
 
 (def alphabet
   "The code alphabet: lowercase letters, no digits. See the namespace
@@ -78,7 +78,7 @@
   that they made a mistake. Anything that is not exactly `code-length`
   letters is nil; this is a validator, not a coercion that guesses."
   [s]
-  (let [letters (-> (str s) str/lower-case (str/replace #"[^a-z]" ""))]
+  (let [letters (-> (str s) str/lower (str/replace #"[^a-z]" ""))]
     (when (= code-length (count letters))
       (meeting-code (map #(str/index-of alphabet %) letters)))))
 
