@@ -31,7 +31,7 @@
   `video-elements`, and re-parented into the freshly rendered tiles after each
   swap."
   (:require [cljs.reader :as reader]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kaigi.invite :as invite]
             [kaigi.model :as m]
             [kaigi.plan :as plan]

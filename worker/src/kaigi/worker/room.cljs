@@ -34,7 +34,7 @@
   only job is undoing the format. `cljs.reader/read-string` reads data only
   (no evaluation), which is what makes this safe on untrusted input."
   (:require [cljs.reader :as reader]
-            [clojure.string :as str]
+            [kotoba.lang.text :as str]
             [kaigi.model :as m]
             [kaigi.plan :as plan]
             [kaigi.realtimekit :as rk]
@@ -144,7 +144,7 @@
   [cfg req]
   (let [authed (rk/authorize req (:api-token cfg))]
     (-> (js/fetch (:kaigi.rk/url authed)
-                  #js {:method (str/upper-case (name (:kaigi.rk/method authed)))
+                  #js {:method (str/upper (name (:kaigi.rk/method authed)))
                        :headers (clj->js (:kaigi.rk/headers authed))
                        :body (js/JSON.stringify (clj->js (:kaigi.rk/body authed)))})
         (.then (fn [res] (.json res)))
@@ -510,7 +510,7 @@
 (defn on-fetch
   "WebSocket upgrade for one room, or a recording upload."
   [ctx env request]
-  (if (not= "websocket" (some-> (.get (.-headers request) "Upgrade") str/lower-case))
+  (if (not= "websocket" (some-> (.get (.-headers request) "Upgrade") str/lower))
     (if (= "PUT" (.-method request))
       (upload-part! ctx env request)
       (js/Promise.resolve (js/Response. "expected websocket" #js {:status 426})))

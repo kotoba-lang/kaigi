@@ -26,7 +26,7 @@
   path that cannot load standalone at all. cloud-itonami's `:edge-api`
   comment records that this passed review more than once. Verify with
   `nbb verify-bundle.cljs`, which actually `import()`s the artifact."
-  (:require [clojure.string :as str]
+  (:require [kotoba.lang.text :as str]
             [kaigi.plan :as plan]
             [kaigi.realtimekit :as rk]
             [kaigi.turn :as turn]

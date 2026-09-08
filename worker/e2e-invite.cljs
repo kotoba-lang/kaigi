@@ -17,7 +17,7 @@
 
 (ns e2e-invite
   (:require ["playwright" :as pw]
-            [clojure.string :as str]))
+            [kotoba.lang.text :as str]))
 
 (def base
   (or (first (filter #(re-find #"^https?://" %) (js->clj (.-argv js/process))))
@@ -143,7 +143,7 @@
                      ;; typed the way a person reads it off a phone call:
                      ;; upper case, no hyphens
                      (.then (fn [_] (.fill (:typed @st) "#kaigi-code"
-                                           (str/upper-case (str/replace (:code @st) "-" "")))))
+                                           (str/upper (str/replace (:code @st) "-" "")))))
                      (.then (fn [_] (.click (:typed @st) "[data-act=\"join-code\"]"))))))
         (.then (fn [_]
                  (.waitForFunction (:typed @st)
