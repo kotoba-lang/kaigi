@@ -24,3 +24,6 @@ worker/public/js/
 
 # Local secrets for `wrangler dev`. Never committed.
 worker/.dev.vars
+
+# nbb dependency cache -- a build artifact, not source
+.nbb/
