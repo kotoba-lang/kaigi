@@ -19,13 +19,13 @@
 
   ## Build
 
-      npx shadow-cljs release worker
+      amu compile --target wasm32-browser worker
 
   `release`, never `compile` — a `compile` build exits 0 and emits every
   expected export name while importing a machine-local `/tmp/cljs-runtime`
   path that cannot load standalone at all. cloud-itonami's `:edge-api`
   comment records that this passed review more than once. Verify with
-  `nbb verify-bundle.cljs`, which actually `import()`s the artifact."
+  `kbb --backend sci verify-bundle.cljk`, which actually `import()`s the artifact."
   (:require [kotoba.lang.text :as str]
             [kaigi.plan :as plan]
             [kaigi.realtimekit :as rk]

@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; A real call on the RealtimeKit plane.
 ;;
 ;; `e2e-media.cljs` pins `?transport=mesh` and asserts PeerConnections and
@@ -17,7 +17,7 @@
 ;; Needs a deployment with real RealtimeKit credentials; there is no local
 ;; equivalent, because the plane is the service.
 ;;
-;;   nbb e2e-realtimekit.cljs https://kaigi.<subdomain>.workers.dev
+;;   kbb --backend sci e2e-realtimekit.cljk https://kaigi.<subdomain>.workers.dev
 
 (ns e2e-realtimekit
   (:require ["playwright" :as pw]))

@@ -4,8 +4,8 @@
   "type": "module",
   "description": "kaigi signaling room — Cloudflare Worker + Durable Object, compiled from ClojureScript",
   "scripts": {
-    "build": "shadow-cljs release worker",
-    "verify": "nbb verify-bundle.cljs",
+    "build": "amu compile --target wasm32-browser worker",
+    "verify": "kbb --backend sci verify-bundle.cljk",
     "deploy": "wrangler deploy"
   },
   "devDependencies": {

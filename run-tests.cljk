@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Two-runtime gate: the same .cljc suite under nbb (ClojureScript on Node),
 ;; not just the JVM.
 ;;
@@ -12,7 +12,7 @@
 ;; tests errored.)
 ;;
 ;; Run:
-;;   nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src:\
+;;   kbb --backend sci --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src:\
 ;;   ../org-ietf-turn/src:../bytes/src" run-tests.cljk
 ;;
 ;; The classpath is passed rather than baked in because nbb resolves

@@ -227,7 +227,7 @@ next time anyone wants it.
 `/js/realtimekit.js`, put there by `vendor-realtimekit.cljs`. Not a
 `:require`, and not a preference: the package's CommonJS entry contains
 `super()` inside an arrow function, which the Closure compiler refuses
-outright — measured 2026-08-01, `shadow-cljs release app` fails with
+outright — measured 2026-08-01, `amu compile --target wasm32-browser app` fails with
 `closure-compiler does not allow calls to super() in arrow functions` at
 `dist/index.cjs.js:8`. The package also ships `dist/browser.js`, a prebuilt
 IIFE assigning the client to a global, which needs no bundler at all.
@@ -350,38 +350,38 @@ the room, and nothing further was captured.
 
 ```bash
 # pure core, both runtimes
-clojure -M:test
-nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-tests.cljk
+kbb -M:test
+kbb --backend sci --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-tests.cljk
 
 # worker
 cd worker
 npm install
-nbb vendor-realtimekit.cljs                 # SDK -> public/js/, see "vendored, not compiled"
-node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release worker
-nbb verify-bundle.cljs                      # actually import()s the artifact
+kbb --backend sci vendor-realtimekit.cljk                 # SDK -> public/js/, see "vendored, not compiled"
+node ../../../../scripts/resource-guard.mjs run build -- amu compile --target wasm32-browser worker
+kbb --backend sci verify-bundle.cljk                      # actually import()s the artifact
 npx wrangler dev --port 8799 --local &
-nbb e2e.cljs ws://127.0.0.1:8799            # two real sockets against a real DO
+kbb --backend sci e2e.cljk ws://127.0.0.1:8799            # two real sockets against a real DO
 
 # console: SSR the shell, score it, build the browser bundle
-nbb --classpath "../src:../../webrtc/src:../../org-w3-webrtc-signaling/src:\
+kbb --backend sci --classpath "../src:../../webrtc/src:../../org-w3-webrtc-signaling/src:\
 ../../kotoba-ui/src:../../liquid-glass-ui/src:../../shitsuke/src:\
 ../../css/src:../../html/src:../../appkit/src" generate-page.cljs
-(cd ../../design-quality && nbb -m design-quality.cli score ../kaigi/worker/public/index.html --min 100)
-node ../../../../scripts/resource-guard.mjs run build -- npx shadow-cljs release app
+(cd ../../design-quality && kbb --backend sci -m design-quality.cli score ../kaigi/worker/public/index.html --min 100)
+node ../../../../scripts/resource-guard.mjs run build -- amu compile --target wasm32-browser app
 
 # a real call: two headless Chromium instances with fake devices, asserting
 # inbound RTP bytes > 0 on both sides. Pins ?transport=mesh, so it proves the
 # mesh still carries media on a Worker configured for RealtimeKit.
-nbb e2e-media.cljs http://127.0.0.1:8799
+kbb --backend sci e2e-media.cljk http://127.0.0.1:8799
 
 # the product claim: a link is the whole of joining
-nbb e2e-invite.cljs http://127.0.0.1:8799
+kbb --backend sci e2e-invite.cljk http://127.0.0.1:8799
 
 npx wrangler deploy
 
 # the RealtimeKit plane needs the real service — there is no local equivalent,
 # because the plane IS the service. Run against the deployment.
-nbb e2e-realtimekit.cljs https://kaigi.<subdomain>.workers.dev
+kbb --backend sci e2e-realtimekit.cljk https://kaigi.<subdomain>.workers.dev
 ```
 
 `release`, never `compile`: a `compile` build exits 0, emits every expected

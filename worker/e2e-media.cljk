@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; A real call: two browsers, real PeerConnections, real RTP.
 ;;
 ;; `e2e.cljs` proves the signaling plane — two sockets, one roster, frames
@@ -24,7 +24,7 @@
 ;;
 ;; Run (against a dev server or the deployment):
 ;;   npx wrangler dev --port 8799 --local &
-;;   nbb e2e-media.cljs http://127.0.0.1:8799
+;;   kbb --backend sci e2e-media.cljk http://127.0.0.1:8799
 
 (ns e2e-media
   (:require ["playwright" :as pw]))

@@ -1,7 +1,7 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Verify the built Worker bundle by actually loading it.
 ;;
-;; This exists because the cheap checks lie. `shadow-cljs compile` exits 0 and
+;; This exists because the cheap checks lie. `amu compile --target wasm32-browser` exits 0 and
 ;; emits every expected export name; `node --check` validates syntax; neither
 ;; notices that a dev-mode artifact imports a machine-local
 ;; `/private/tmp/cljs-runtime/...` path and therefore cannot load standalone at
@@ -20,7 +20,7 @@
 ;;   - /api/kaigi/health answers, and reports mesh when no SFU is configured
 ;;   - a bad meeting id is rejected
 ;;
-;; Run: nbb verify-bundle.cljs
+;; Run: kbb --backend sci verify-bundle.cljk
 
 (ns verify-bundle
   (:require ["node:child_process" :as cp]
@@ -127,7 +127,7 @@
 (defn -main []
   (cond
     (not (fs/existsSync bundle))
-    (fail! (str bundle " does not exist — run `npx shadow-cljs release worker` first"))
+    (fail! (str bundle " does not exist — run `amu compile --target wasm32-browser worker` first"))
 
     (staleness-guard!) nil
 

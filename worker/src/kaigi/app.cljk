@@ -420,7 +420,7 @@
   A `<script>` tag rather than a `:require`, and this is not a style choice.
   The published package's CommonJS entry contains `super()` inside an arrow
   function, which the Closure compiler refuses outright — measured
-  2026-08-01, `shadow-cljs release app` fails with `closure-compiler does not
+  2026-08-01, `amu compile --target wasm32-browser app` fails with `closure-compiler does not
   allow calls to super() in arrow functions` at
   `@cloudflare/realtimekit/dist/index.cjs.js:8`. The package also ships
   `dist/browser.js`, a prebuilt IIFE that assigns the client to a global, and

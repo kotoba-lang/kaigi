@@ -1,11 +1,11 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Copy the RealtimeKit browser SDK into public/js/ as a static asset.
 ;;
 ;; Why this is not a `:require` in `kaigi.app`
 ;;
 ;; The published package's CommonJS entry contains `super()` inside an arrow
 ;; function, and the Closure compiler refuses to compile that at all. Measured
-;; 2026-08-01, `shadow-cljs release app` fails with:
+;; 2026-08-01, `amu compile --target wasm32-browser app` fails with:
 ;;
 ;;   Closure compilation failed with 1 errors
 ;;   --- node_modules/@cloudflare/realtimekit/dist/index.cjs.js:8
@@ -22,7 +22,7 @@
 ;;
 ;; Run (from worker/, after npm install and before wrangler deploy):
 ;;
-;;   nbb vendor-realtimekit.cljs
+;;   kbb --backend sci vendor-realtimekit.cljk
 
 (ns vendor-realtimekit
   (:require ["node:fs" :as fs]
