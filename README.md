@@ -351,7 +351,7 @@ the room, and nothing further was captured.
 ```bash
 # pure core, both runtimes
 clojure -M:test
-nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-tests.cljs
+nbb --classpath "src:test:../webrtc/src:../org-w3-webrtc-signaling/src" run-tests.cljk
 
 # worker
 cd worker
