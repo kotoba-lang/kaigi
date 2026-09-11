@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; The claim this file exists to test: **you can share a URL and people join.**
 ;;
 ;; `e2e.cljs` proves the room relays frames and `e2e-media.cljs` proves media
@@ -13,7 +13,7 @@
 ;;
 ;; Run:
 ;;   npx wrangler dev --port 8799 --local &
-;;   nbb e2e-invite.cljs http://127.0.0.1:8799
+;;   kbb --backend sci e2e-invite.cljk http://127.0.0.1:8799
 
 (ns e2e-invite
   (:require ["playwright" :as pw]

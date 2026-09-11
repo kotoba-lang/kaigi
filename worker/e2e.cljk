@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; End-to-end test of a real room: two WebSocket clients against a running
 ;; kaigi Worker, exercising the Durable Object for real.
 ;;
@@ -13,9 +13,9 @@
 ;;
 ;; Run against a local dev server:
 ;;   npx wrangler dev --port 8799 --local &
-;;   nbb e2e.cljs ws://127.0.0.1:8799
+;;   kbb --backend sci e2e.cljk ws://127.0.0.1:8799
 ;; or against the deployment:
-;;   nbb e2e.cljs wss://kaigi.<subdomain>.workers.dev
+;;   kbb --backend sci e2e.cljk wss://kaigi.<subdomain>.workers.dev
 ;;
 ;; Written as a flat list of steps rather than a nested promise tree: the
 ;; nested version was written first and had a paren mismatch that took longer

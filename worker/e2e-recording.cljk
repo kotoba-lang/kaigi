@@ -1,4 +1,4 @@
-#!/usr/bin/env nbb
+#!/usr/bin/env kbb
 ;; Recording, end to end: real MediaRecorder output reaching real storage, and
 ;; a consent withdrawal actually stopping it.
 ;;
@@ -10,7 +10,7 @@
 ;;
 ;; Run (needs a dev server with the R2 binding, and fake media devices):
 ;;   npx wrangler dev --port 8799 --local &
-;;   nbb e2e-recording.cljs http://127.0.0.1:8799
+;;   kbb --backend sci e2e-recording.cljk http://127.0.0.1:8799
 
 (ns e2e-recording
   (:require ["playwright" :as pw]
