@@ -6,7 +6,7 @@
   produce. That is the whole point: a typo in `trackName` would still make a
   round trip through `push-tracks-request` and back, so the assertion has to
   come from outside the implementation."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kaigi.sfu :as sfu]))
 
 (def app "1a4b7c")
