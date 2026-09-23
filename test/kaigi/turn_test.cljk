@@ -1,5 +1,5 @@
 (ns kaigi.turn-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kaigi.turn :as turn]
             [kotoba.turn.credential :as cred]))
 

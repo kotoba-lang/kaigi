@@ -1,5 +1,5 @@
 (ns kaigi.realtimekit-test
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [kaigi.model :as m]
             [kaigi.realtimekit :as rk]))
 
