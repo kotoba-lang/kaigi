@@ -5,6 +5,11 @@
 ;; :paths and every sha below are COPIED from deps.edn, not chosen here.
 {:paths ["src" "."]
  :deps {
+        ;; kotoba.lang.coll replaced clojure.set here (2026-09-24). An explicit
+        ;; floor: kotoba.lang.coll carries clojure.set's union/intersection/
+        ;; difference/map-invert from 0ffd5f6, and tools.deps takes the NEWEST
+        ;; sha it is shown.
+        io.github.kotoba-lang/coll {:git/sha "0ffd5f6340af50871d4759b06e02ac4fbf9a4bdf"}
         ;; kotoba.test (clojure.test-compatible surface), not clojure.test --
         ;; scripts/migrate-clojure-test-to-kotoba-test.cljk. Explicit floor.
         io.github.kotoba-lang/test {:git/url "https://github.com/kotoba-lang/test.git"

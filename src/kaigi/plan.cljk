@@ -49,7 +49,7 @@
   participant already has would renegotiate the PeerConnection on every
   roster change, which is visible as a video freeze for everyone — so the
   plan is always expressed as `pull these, close those`."
-  (:require [clojure.set :as set]
+  (:require [kotoba.lang.coll :as set]
             [kaigi.model :as m]
             [kaigi.realtimekit :as rk]
             [kaigi.sfu :as sfu]
