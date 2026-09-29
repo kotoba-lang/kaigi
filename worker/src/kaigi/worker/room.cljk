@@ -7,7 +7,7 @@
   a fencing token, or a compare-and-swap loop. A Durable Object is globally
   unique and single-threaded per id, so `one writer` is a property of where
   the code runs rather than something this file has to implement. That is the
-  use CLAUDE.md sanctions: **DO as serializer and realtime room, D1 for
+  use AGENTS.md sanctions: **DO as serializer and realtime room, D1 for
   storage.**
 
   Accordingly the authoritative *live* meeting value lives here (in memory,
