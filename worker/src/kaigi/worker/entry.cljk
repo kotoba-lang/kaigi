@@ -9,7 +9,7 @@
   exactly those names, and whose constructor takes `(ctx, env)` positionally.
   ClojureScript's `deftype` emits precisely that: positional constructor
   fields and `Object` protocol methods written to the prototype un-munged. So
-  the class needs no JavaScript shim — which matters here because CLAUDE.md
+  the class needs no JavaScript shim — which matters here because AGENTS.md
   forbids new hand-written `.mjs`, and a shim is where the logic would start
   leaking back into JS.
 
